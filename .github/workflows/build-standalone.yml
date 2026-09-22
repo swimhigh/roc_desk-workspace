@@ -1,0 +1,29 @@
+name: Build standalone EXE
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build EXE
+        shell: pwsh
+        run: .\build-standalone.ps1
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: roc_desk-workspace
+          path: bin\roc_desk-workspace.exe
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin\roc_desk-workspace.exe
