@@ -10,3 +10,7 @@ tauri = { version = "2", features = ["wry"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

@@ -1,26 +1,26 @@
 {
-    "productName":  "?????",
-    "version":  "0.1.0",
-    "identifier":  "com.rocdesk.workspace",
-    "build":  {
-                  "frontendDist":  "dist"
-              },
-    "app":  {
-                "windows":  [
-                                {
-                                    "label":  "main",
-                                    "title":  "?????",
-                                    "width":  1100,
-                                    "height":  720,
-                                    "resizable":  true
-                                }
-                            ]
-            },
-    "bundle":  {
-                   "active":  false,
-                   "icon":  [
-                                "icons/32x32.png",
-                                "icons/icon.ico"
-                            ]
-               }
+  "productName": "\u7f16\u7a0b\u5de5\u4f5c\u533a",
+  "version": "0.1.0",
+  "identifier": "com.rocdesk.workspace",
+  "build": {
+    "frontendDist": "dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "\u7f16\u7a0b\u5de5\u4f5c\u533a",
+        "width": 1100,
+        "height": 720,
+        "resizable": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "icons/32x32.png",
+      "icons/icon.ico"
+    ]
+  }
 }

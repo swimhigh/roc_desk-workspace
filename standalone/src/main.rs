@@ -1,1 +1,8 @@
-fn main() { tauri::Builder::default().setup(|app| { let window = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into())).title("?????").inner_size(1100.0, 720.0).build()?; let _ = window; Ok(()) }).run(tauri::generate_context!()).expect("failed to run standalone tool"); }
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+fn main() {
+    // The main window is declared once in tauri.conf.json.
+    tauri::Builder::default()
+        .run(tauri::generate_context!())
+        .expect("failed to run standalone tool");
+}
