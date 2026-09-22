@@ -1,10 +1,19 @@
-﻿[package]
+[package]
 name = "roc_desk_workspace"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-roc_desk_core = { git = "https://github.com/swimhigh/roc_desk-common", package = "roc_desk_core", tag = "common-v0.2.4" }
-
-
-
+roc_desk_core = { git = "https://github.com/swimhigh/roc_desk-common", package = "roc_desk_core", tag = "common-v0.5.0" }
+# Local filesystem browsing/editing + root-path-keyed symbol index +
+# embeddable <EditorPane/> all come from roc_desk-editor (which itself
+# re-exports roc_desk-explorer) instead of being reimplemented here -- see
+# lib/src/lib.rs for the rationale.
+roc_desk_editor = { git = "https://github.com/swimhigh/roc_desk-editor", package = "roc_desk_editor", tag = "v0.2.1" }
+roc_desk_explorer = { git = "https://github.com/swimhigh/roc_desk-explorer", package = "roc_desk_explorer", tag = "v0.2.1" }
+tauri = { version = "2" }
+tokio = { version = "1", features = ["sync", "process", "fs", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.9"

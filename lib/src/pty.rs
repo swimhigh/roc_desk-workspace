@@ -1,3 +1,8 @@
+//! Local terminal (`portable-pty`, Windows ConPTY under the hood), ported
+//! 1:1 from the host's `src-tauri/src/pty/mod.rs`. Remote (SSH/Agent)
+//! terminal sessions stay a `roc_desk-ssh` concern -- that tool hasn't been
+//! split out of the host yet.
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -7,7 +12,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
-use crate::error::AppError;
+use roc_desk_core::error::AppError;
 
 enum PtyCommand {
     Data(Vec<u8>),
@@ -16,18 +21,17 @@ enum PtyCommand {
 
 struct PtyChannel {
     cmd_tx: mpsc::UnboundedSender<PtyCommand>,
-    /// `Child` 被 drop 不会杀死子进程（和 `std::process::Child` 语义一致），必须显式
-    /// `kill()`，否则关掉终端 Tab 只是不再监听输出，PowerShell/bash 进程会一直挂着——
-    /// 这点和 SSH Channel 关闭时服务端会话跟着结束不一样，本地 PTY 没有这层保证。
+    /// Dropping `Child` does not kill the underlying process (same semantics
+    /// as `std::process::Child`) -- it must be killed explicitly, or closing
+    /// a terminal tab would only stop listening for output while the
+    /// PowerShell/bash process kept running in the background.
     child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
-/// 本地终端（DESIGN.md §3.2 终端面板，本地工作区分支）：远程工作区走 SSH Channel，
-/// 本地工作区没有 SSH 连接可复用，需要单独起一个真正的本地 PTY（Windows 上底层是
-/// ConPTY）。读写都是同步系统调用，不能直接塞进 `tokio::select!`（那是给 async I/O
-/// 设计的）——读走一个独立 OS 线程阻塞 `read()` 再把数据经 `AppHandle::emit` 推给
-/// 前端，写走一个 `mpsc` 队列 + 单独任务串行处理，和 `ssh::session::SshSession`
-/// 里"一个任务独占 Channel"的思路一致，只是读写各自换成了适合同步 API 的形式。
+/// Local terminal manager: one PTY per open terminal tab. Reads happen on a
+/// dedicated OS thread (blocking `read()` can't be awaited directly), writes
+/// go through an `mpsc` queue processed by a single task, mirroring the
+/// "one task owns the channel" approach used by remote SSH sessions.
 pub struct LocalPtyManager {
     channels: RwLock<HashMap<Uuid, PtyChannel>>,
 }
@@ -53,8 +57,9 @@ fn default_shell() -> CommandBuilder {
 }
 
 impl LocalPtyManager {
-    /// 打开一个本地终端，默认工作目录就是当前工作区根目录（参考 VS Code 打开项目后
-    /// 集成终端自动进到项目目录，而不是用户主目录）。
+    /// Opens a local terminal with `cwd` as its starting directory (mirrors
+    /// VS Code's integrated terminal defaulting to the open project's root
+    /// rather than the user's home directory).
     pub async fn open(
         &self,
         cwd: String,
@@ -83,8 +88,9 @@ impl LocalPtyManager {
                     .slave
                     .spawn_command(cmd)
                     .map_err(|e| AppError::Internal(format!("spawn shell failed: {e}")))?;
-                // slave 端父进程这边不再需要了，子进程内部持有自己的一份；不 drop 的话
-                // master 侧的读端永远等不到 EOF（slave 还有一个引用活着）。
+                // The parent side no longer needs the slave end once the
+                // child owns its own reference; not dropping it means the
+                // master-side reader would never see EOF.
                 drop(pair.slave);
 
                 let reader = pair
@@ -159,15 +165,11 @@ impl LocalPtyManager {
 }
 
 fn spawn_reader_thread(id: Uuid, mut reader: Box<dyn Read + Send>, app_handle: AppHandle) {
-    // 阻塞读用独立 OS 线程，不占 tokio 的工作线程池——PTY 读端在 shell 退出前会
-    // 一直阻塞在 read() 上，扔进 tokio::task::spawn_blocking 也可以，但那个池子是
-    // 有限且共享的，专用线程更简单直接，生命周期就是这一个终端 Tab 的生命周期。
     std::thread::spawn(move || {
-        // 和 SSH/Agent 的 open_shell 同一个理由：前端拿到 channelId 后还要走一次 IPC
-        // 往返 + React 挂载才会挂上 `listen("pty:data", ...)`，本地 shell 起来几乎
-        // 是瞬间的事，比这个窗口期快得多，第一行提示符/MOTD 很容易在没人监听时被
-        // `emit` 掉、白白丢失。这段时间里没人读，字节就安静地留在 PTY 主端的内核
-        // 缓冲区里，不会丢——延后一小会儿再开始读，等前端监听器大概率已经挂上。
+        // The frontend needs an IPC round-trip plus a React mount before it
+        // has `listen("pty:data", ...)` wired up; a short delay avoids the
+        // shell's first prompt/MOTD being emitted into the void before
+        // anyone is listening.
         std::thread::sleep(std::time::Duration::from_millis(200));
         let mut buf = [0u8; 4096];
         loop {

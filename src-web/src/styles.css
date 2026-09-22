@@ -1,0 +1,92 @@
+/* Minimal self-contained styling, not a design system -- the host's full
+   stylesheet (design tokens, shared dialog/toast chrome) hasn't been
+   extracted into a shared `ui-core` package yet (see
+   docs/MULTI_REPO_SPLIT_PROGRESS.md in the host repository). This just makes
+   the standalone shell legible. */
+:root {
+  --bg-base: #1e1e1e;
+  --bg-surface: #252526;
+  --bg-surface-raised: #2a2a2a;
+  --border: #3a3a3a;
+  --text-primary: #e6e6e6;
+  --text-secondary: #9a9a9a;
+  --accent: #4fa3ff;
+  --danger: #f38ba8;
+  --success: #a6e3a1;
+  --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+}
+
+button {
+  font-family: inherit;
+}
+
+.btn {
+  border: 1px solid var(--border);
+  background: var(--bg-surface-raised);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.btn:hover { background: #333; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #08243f; font-weight: 600; }
+.btn.ghost { background: transparent; border-color: transparent; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.app-shell { display: flex; flex-direction: column; height: 100%; }
+.titlebar {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  background: var(--bg-surface); border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.titlebar-title { font-weight: 600; flex: 1; }
+.titlebar-path { color: var(--text-secondary); font-family: var(--font-mono); font-size: 12px; }
+
+.body-row { display: flex; flex: 1; min-height: 0; }
+.sidebar { width: 260px; flex-shrink: 0; border-right: 1px solid var(--border); overflow: auto; display: flex; flex-direction: column; }
+.main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--bg-surface); flex-shrink: 0; }
+.tab { padding: 6px 14px; cursor: pointer; color: var(--text-secondary); font-size: 12px; border-right: 1px solid var(--border); }
+.tab.active { color: var(--text-primary); background: var(--bg-base); }
+
+.main-content { flex: 1; min-height: 0; overflow: auto; }
+
+.bottom-panel { border-top: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg-surface); }
+.bottom-panel-header { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-bottom: 1px solid var(--border); }
+.bottom-panel-body { flex: 1; min-height: 0; }
+
+.tree-item { display: flex; align-items: center; gap: 4px; padding: 3px 8px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+.tree-item:hover { background: #2c2c2c; }
+.tree-item.active { background: #2f3542; }
+.tree-icon { width: 14px; height: 14px; flex-shrink: 0; }
+.tree-icon.is-dir { color: #e0af68; }
+
+.welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 12px; }
+.recent-list { list-style: none; margin: 0; padding: 0; width: 340px; }
+.recent-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-radius: 4px; cursor: pointer; }
+.recent-item:hover { background: var(--bg-surface-raised); }
+.recent-item-path { color: var(--text-secondary); font-size: 11px; font-family: var(--font-mono); }
+
+.editor-textarea {
+  width: 100%; height: 100%; box-sizing: border-box; resize: none; border: none; outline: none;
+  background: var(--bg-base); color: var(--text-primary); font-family: var(--font-mono); font-size: 13px;
+  padding: 10px; line-height: 1.5;
+}
+
+.git-panel { padding: 10px; overflow: auto; height: 100%; box-sizing: border-box; }
+.git-output { white-space: pre-wrap; font-family: var(--font-mono); font-size: 12px; background: var(--bg-surface-raised); padding: 8px; border-radius: 4px; max-height: 280px; overflow: auto; }
+.git-actions { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+
+.status-bar { display: flex; justify-content: space-between; padding: 3px 10px; font-size: 11px; color: var(--text-secondary); border-top: 1px solid var(--border); flex-shrink: 0; }
+
+.error-banner { background: #3a2020; color: var(--danger); padding: 6px 10px; font-size: 12px; }
