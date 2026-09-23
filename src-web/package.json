@@ -16,7 +16,9 @@
     "@xterm/xterm": "^5.5",
     "lucide-react": "^0.469",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "zustand": "^5",
+    "@roc_desk/tool-editor": "file:../../roc_desk-editor/src-web"
   },
   "devDependencies": {
     "@types/react": "^19.1.8",
