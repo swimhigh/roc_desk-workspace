@@ -3,32 +3,14 @@
 use roc_desk_workspace::roc_desk_editor::symbols::SymbolIndexState;
 use roc_desk_workspace::WorkspaceAppState;
 
-fn app_data_dir() -> std::path::PathBuf {
-    dirs_next_data_dir().join("roc_desk-workspace")
-}
-
-/// Minimal stand-in for `tauri::AppHandle::path().app_data_dir()` at the
-/// point this state is constructed (before the app is fully built) --
-/// mirrors the pattern used by the other standalone tool shells
-/// (`roc_desk-sql`, `roc_desk-ssh`).
-fn dirs_next_data_dir() -> std::path::PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("APPDATA")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::env::var("HOME")
-            .map(|h| std::path::PathBuf::from(h).join(".local/share"))
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-    }
-}
-
 fn main() {
-    let data_dir = app_data_dir();
-    std::fs::create_dir_all(&data_dir).expect("failed to create app data dir");
+    // Portable, exe-relative `.rock_desk` dir (see
+    // `roc_desk_core::paths::portable_data_dir` docs) instead of an
+    // OS-AppData path keyed by this tool's own name — keeps this standalone
+    // tool's data in the same place/layout the full `roc_desk.exe` host
+    // uses, so copying several standalone tool exes into one directory
+    // makes them share it automatically.
+    let data_dir = roc_desk_core::paths::portable_data_dir().expect("failed to resolve app data dir");
     let db_path = data_dir.join("workspace.db");
     let cache_root = data_dir.join("workspace-cache");
     let state = WorkspaceAppState::new(&db_path, cache_root).expect("failed to init workspace state");

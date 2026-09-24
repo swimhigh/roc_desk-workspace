@@ -6,6 +6,7 @@ build = "build.rs"
 
 [dependencies]
 roc_desk_workspace = { path = "../lib" }
+roc_desk_core = { git = "https://github.com/swimhigh/roc_desk-common", package = "roc_desk_core", tag = "common-v0.6.0" }
 tauri = { version = "2", features = ["wry"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
