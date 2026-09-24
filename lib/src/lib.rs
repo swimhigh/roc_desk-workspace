@@ -63,16 +63,44 @@ pub mod pty;
 pub use roc_desk_editor;
 pub use roc_desk_explorer;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use roc_desk_core::error::AppError;
-use roc_desk_core::workspace::WorkspaceManager;
+use roc_desk_core::workspace::{WorkspaceManager, WorkspaceProfile};
+use roc_desk_common::fsops::FileOps;
+
+/// A currently-*open* workspace's runtime handle -- not persisted, rebuilt
+/// every time a workspace is opened (mirrors the host's
+/// `workspace::WorkspaceHandle`). Consumers that need to act on an open
+/// workspace (a future ported AI coding agent, first and foremost) look
+/// this up from [`WorkspaceAppState::open_workspaces`] by workspace id
+/// instead of re-deriving a `FileOps` from the profile every time.
+#[derive(Clone)]
+pub struct WorkspaceHandle {
+    pub profile: WorkspaceProfile,
+    pub file_ops: Arc<dyn FileOps>,
+}
 
 /// Shared state for this tool's Tauri commands. Constructed once at startup
 /// (see [`WorkspaceAppState::new`]) and registered with `tauri::Builder::manage`.
 pub struct WorkspaceAppState {
     pub workspace_manager: WorkspaceManager,
     pub local_pty: pty::SharedLocalPtyManager,
+    /// Workspaces currently open in this process, keyed by `WorkspaceProfile.id`.
+    /// `workspace_open_local` inserts into this on open; `workspace_close`
+    /// removes. Only local workspaces are supported here today --
+    /// `roc_desk_core::workspace::WorkspaceManager::open_remote` exists (see
+    /// `common-v0.10.0`) but resolving a `connection_id` into an actual
+    /// connection/`FileOps` needs `roc_desk-ssh`'s connection pools, which
+    /// this crate does not depend on yet (see the module doc's "not ported"
+    /// list) -- adding remote support here is a separate follow-up, not
+    /// blocked by anything in this registry's shape.
+    pub open_workspaces: Arc<RwLock<HashMap<Uuid, WorkspaceHandle>>>,
 }
 
 impl WorkspaceAppState {
@@ -88,6 +116,7 @@ impl WorkspaceAppState {
         Ok(Self {
             workspace_manager,
             local_pty: std::sync::Arc::new(pty::LocalPtyManager::default()),
+            open_workspaces: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 }
@@ -104,7 +133,7 @@ pub mod cmd {
     use roc_desk_core::error::AppError;
     use roc_desk_core::workspace::WorkspaceProfile;
 
-    use crate::WorkspaceAppState;
+    use crate::{WorkspaceAppState, WorkspaceHandle};
 
     // -----------------------------------------------------------------------
     // Workspace (recent-folder tracking)
@@ -123,7 +152,26 @@ pub mod cmd {
         state: State<'_, WorkspaceAppState>,
         path: String,
     ) -> Result<WorkspaceProfile, AppError> {
-        state.workspace_manager.open_local(&path)
+        let profile = state.workspace_manager.open_local(&path)?;
+        let handle = WorkspaceHandle {
+            profile: profile.clone(),
+            file_ops: std::sync::Arc::new(roc_desk_common::fsops::local::LocalFileOps),
+        };
+        state.open_workspaces.write().await.insert(profile.id, handle);
+        Ok(profile)
+    }
+
+    /// Drops a workspace's runtime handle (does *not* touch its "recent
+    /// workspaces" entry -- that's `workspace_remove_recent`'s job). Call
+    /// when the frontend closes a workspace tab/window so `open_workspaces`
+    /// doesn't grow unbounded across a long-running session.
+    #[tauri::command]
+    pub async fn workspace_close(
+        state: State<'_, WorkspaceAppState>,
+        id: Uuid,
+    ) -> Result<(), AppError> {
+        state.open_workspaces.write().await.remove(&id);
+        Ok(())
     }
 
     #[tauri::command]
@@ -141,6 +189,18 @@ pub mod cmd {
         new_path: String,
     ) -> Result<WorkspaceProfile, AppError> {
         state.workspace_manager.update_path(id, &new_path)
+    }
+
+    #[tauri::command]
+    pub async fn workspace_update_last_sftp_paths(
+        state: State<'_, WorkspaceAppState>,
+        id: Uuid,
+        local_path: String,
+        remote_path: String,
+    ) -> Result<(), AppError> {
+        state
+            .workspace_manager
+            .update_last_sftp_paths(id, &local_path, &remote_path)
     }
 
     // -----------------------------------------------------------------------
