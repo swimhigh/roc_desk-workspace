@@ -12,5 +12,6 @@ pub mod guard;
 pub mod local_exec;
 pub mod permission;
 pub mod target;
+pub mod tools;
 
 pub use target::CodingTarget;
