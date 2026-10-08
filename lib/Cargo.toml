@@ -12,6 +12,11 @@ roc_desk_common = { git = "https://github.com/swimhigh/roc_desk-common", package
 # lib/src/lib.rs for the rationale.
 roc_desk_editor = { git = "https://github.com/swimhigh/roc_desk-editor", package = "roc_desk_editor", tag = "v0.2.8" }
 roc_desk_explorer = { git = "https://github.com/swimhigh/roc_desk-explorer", package = "roc_desk_explorer", tag = "v0.2.8" }
+# Remote (SSH/Agent) workspace support -- resolves a connection_id into an
+# actual connection/FileOps, which roc_desk_core::workspace deliberately
+# cannot do itself (it never depends on roc_desk-ssh). See
+# WorkspaceAppState::new_with_ssh in lib.rs for how the pools get here.
+roc_desk_ssh = { git = "https://github.com/swimhigh/roc_desk-ssh", package = "roc_desk_ssh", tag = "v0.3.5" }
 tauri = { version = "2" }
 tokio = { version = "1", features = ["sync", "process", "fs", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4", "serde"] }

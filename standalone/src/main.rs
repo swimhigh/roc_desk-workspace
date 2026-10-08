@@ -24,8 +24,15 @@ fn main() {
             // This tool's own commands.
             roc_desk_workspace::cmd::workspace_list_recent,
             roc_desk_workspace::cmd::workspace_open_local,
+            // Standalone has no SSH connection-management UI/commands of its
+            // own, so `WorkspaceAppState::with_ssh` is never called here --
+            // this always returns the "not enabled" error, registered anyway
+            // for forward compatibility (host wiring calls `with_ssh`).
+            roc_desk_workspace::cmd::workspace_open_remote,
+            roc_desk_workspace::cmd::workspace_close,
             roc_desk_workspace::cmd::workspace_remove_recent,
             roc_desk_workspace::cmd::workspace_update_path,
+            roc_desk_workspace::cmd::workspace_update_last_sftp_paths,
             roc_desk_workspace::cmd::pty_open,
             roc_desk_workspace::cmd::pty_write,
             roc_desk_workspace::cmd::pty_resize,

@@ -31,10 +31,13 @@
 //!   (tool definitions, permission gating, change-staging with undo). This
 //!   was judged too large to attempt safely alongside everything else in
 //!   this pass -- see the task's final report for the full reasoning.
-//! - Remote (SSH/Agent) workspaces and remote terminal sessions -- depend on
-//!   `roc_desk-ssh`'s connection pools, which haven't been split out of the
-//!   host yet. `roc_desk_core::workspace` and this crate's `pty`/`git`
-//!   modules are therefore local-only.
+//! - Remote (SSH/Agent) *workspace opening* is now supported (see
+//!   `WorkspaceAppState::with_ssh`, `cmd::workspace_open_remote`) -- but
+//!   remote *terminal sessions* (`pty_*` only ever spawns a local shell) and
+//!   the Git panel (`git_*` only ever shells out locally) are still
+//!   local-only; those would need their own remote execution path
+//!   (`roc_desk_ssh::ssh::session`/`agent::session` exec), not attempted
+//!   here.
 //! - Skills archive import (`coding::skills`) and web fetch
 //!   (`coding::webfetch`) -- lower priority per the task brief, skipped to
 //!   keep scope manageable.
@@ -86,28 +89,52 @@ pub struct WorkspaceHandle {
     pub file_ops: Arc<dyn FileOps>,
 }
 
+/// Remote (SSH/Agent) connection pools, needed to resolve a `connection_id`
+/// into an actual connection/`FileOps` -- kept as a separate, optional group
+/// of fields (not required by [`WorkspaceAppState::new`]) because *who owns
+/// these pools* is a caller decision this crate shouldn't make for them:
+///
+/// - When wired into the host, `workspace_open_remote` must resolve through
+///   the *same* pools the host's SSH panel and AI coding agent already use
+///   (`roc_desk_ssh::RocDeskSshAppState`'s), not a second, disconnected set
+///   -- otherwise a connection opened in the SSH panel wouldn't be visible
+///   here, the exact "split registry" bug this migration has repeatedly had
+///   to design around.
+/// - A standalone build of this tool has no such existing state to share,
+///   and would need to construct its own (which also means it needs its own
+///   connection-management UI/commands -- out of scope here, see the module
+///   doc's "not ported" list).
+///
+/// [`WorkspaceAppState::with_ssh`] is how a caller that already has a
+/// `RocDeskSshAppState` (or equivalent pools) opts into remote workspace
+/// support after construction.
+pub struct SshPools {
+    pub connection_manager: Arc<roc_desk_ssh::connection::ConnectionManager>,
+    pub ssh_pool: Arc<roc_desk_ssh::ssh::SshConnectionPool>,
+    pub agent_pool: Arc<roc_desk_ssh::agent::AgentConnectionPool>,
+}
+
 /// Shared state for this tool's Tauri commands. Constructed once at startup
 /// (see [`WorkspaceAppState::new`]) and registered with `tauri::Builder::manage`.
 pub struct WorkspaceAppState {
     pub workspace_manager: WorkspaceManager,
     pub local_pty: pty::SharedLocalPtyManager,
     /// Workspaces currently open in this process, keyed by `WorkspaceProfile.id`.
-    /// `workspace_open_local` inserts into this on open; `workspace_close`
-    /// removes. Only local workspaces are supported here today --
-    /// `roc_desk_core::workspace::WorkspaceManager::open_remote` exists (see
-    /// `common-v0.10.0`) but resolving a `connection_id` into an actual
-    /// connection/`FileOps` needs `roc_desk-ssh`'s connection pools, which
-    /// this crate does not depend on yet (see the module doc's "not ported"
-    /// list) -- adding remote support here is a separate follow-up, not
-    /// blocked by anything in this registry's shape.
+    /// `workspace_open_local`/`workspace_open_remote` insert into this on
+    /// open; `workspace_close` removes.
     pub open_workspaces: Arc<RwLock<HashMap<Uuid, WorkspaceHandle>>>,
+    /// `None` until [`WorkspaceAppState::with_ssh`] is called -- remote
+    /// workspace commands return a clear "not enabled" error rather than
+    /// panicking when this hasn't been wired up.
+    pub ssh: Option<SshPools>,
 }
 
 impl WorkspaceAppState {
     /// `db_path` is this tool's own SQLite file (the "recent workspaces"
     /// list); `cache_root` is where the fallback `.rock_desk` workspace
     /// metadata cache directory lives (mirrors the host's
-    /// `WorkspaceManager::new`).
+    /// `WorkspaceManager::new`). Remote workspace support starts disabled --
+    /// see [`WorkspaceAppState::with_ssh`].
     pub fn new(db_path: &std::path::Path, cache_root: PathBuf) -> Result<Self, AppError> {
         let pool = roc_desk_core::db::pool::create_pool(db_path)?;
         let repo = roc_desk_core::workspace::WorkspaceRepo::new(pool);
@@ -117,7 +144,51 @@ impl WorkspaceAppState {
             workspace_manager,
             local_pty: std::sync::Arc::new(pty::LocalPtyManager::default()),
             open_workspaces: Arc::new(RwLock::new(HashMap::new())),
+            ssh: None,
         })
+    }
+
+    /// Enables remote (SSH/Agent) workspace support using the given
+    /// connection pools -- see [`SshPools`]'s doc for why these are supplied
+    /// rather than constructed here.
+    pub fn with_ssh(
+        mut self,
+        connection_manager: Arc<roc_desk_ssh::connection::ConnectionManager>,
+        ssh_pool: Arc<roc_desk_ssh::ssh::SshConnectionPool>,
+        agent_pool: Arc<roc_desk_ssh::agent::AgentConnectionPool>,
+    ) -> Self {
+        self.ssh = Some(SshPools {
+            connection_manager,
+            ssh_pool,
+            agent_pool,
+        });
+        self
+    }
+
+    /// SSH/Agent are both "remote" connections; which pool/`FileOps` impl to
+    /// use depends on the connection profile's `protocol` field. Mirrors the
+    /// host's old `workspace::WorkspaceManager::remote_file_ops`.
+    async fn remote_file_ops(
+        &self,
+        connection: &roc_desk_ssh::connection::ConnectionProfile,
+    ) -> Result<Arc<dyn FileOps>, AppError> {
+        let ssh = self
+            .ssh
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("远程工作区功能未启用".into()))?;
+        match connection.protocol {
+            roc_desk_ssh::connection::Protocol::Agent => {
+                let session = ssh.agent_pool.get_or_connect(connection.id).await?;
+                Ok(Arc::new(roc_desk_ssh::agent::fsops::AgentFileOps::new(session)))
+            }
+            roc_desk_ssh::connection::Protocol::Ssh => {
+                let session = ssh.ssh_pool.get_or_connect(connection.id).await?;
+                Ok(Arc::new(roc_desk_ssh::fsops::remote::RemoteFileOps::new(session)))
+            }
+            roc_desk_ssh::connection::Protocol::Rdp => {
+                Err(AppError::Internal("RDP 连接不能作为文件工作区".into()))
+            }
+        }
     }
 }
 
@@ -156,6 +227,78 @@ pub mod cmd {
         let handle = WorkspaceHandle {
             profile: profile.clone(),
             file_ops: std::sync::Arc::new(roc_desk_common::fsops::local::LocalFileOps),
+        };
+        state.open_workspaces.write().await.insert(profile.id, handle);
+        Ok(profile)
+    }
+
+    /// Connects to `connection_id` (via the SSH/Agent pools passed to
+    /// [`WorkspaceAppState::with_ssh`]) and opens `remote_path` on it as a
+    /// workspace -- mirrors the host's old `commands::workspace::
+    /// workspace_open_remote`. Probes for an embedded `.rock_desk/
+    /// workspace.json` marker on the remote host first (so re-opening the
+    /// same remote directory, even from a different machine/profile that
+    /// shares the directory but not this tool's local database, keeps the
+    /// same workspace id), and writes one back after opening (best-effort --
+    /// a read-only remote directory shouldn't make opening it as a
+    /// *read-only* workspace fail).
+    #[tauri::command]
+    pub async fn workspace_open_remote(
+        state: State<'_, WorkspaceAppState>,
+        connection_id: Uuid,
+        remote_path: String,
+    ) -> Result<WorkspaceProfile, AppError> {
+        let ssh = state
+            .ssh
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("远程工作区功能未启用".into()))?;
+        let connection = ssh
+            .connection_manager
+            .get(connection_id)?
+            .ok_or_else(|| AppError::NotFound(format!("connection not found: {connection_id}")))?;
+
+        let file_ops = state.remote_file_ops(&connection).await?;
+
+        let metadata_path = format!("{}/.rock_desk/workspace.json", remote_path.trim_end_matches('/'));
+        let embedded_workspace_id = file_ops
+            .read_file(&metadata_path)
+            .await
+            .ok()
+            .and_then(|file| serde_json::from_str::<serde_json::Value>(&file.text).ok())
+            .filter(|meta| {
+                meta["kind"].as_str() == Some("remote") && meta["root_path"].as_str() == Some(remote_path.as_str())
+            })
+            .and_then(|meta| meta["workspace_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()));
+
+        let display_name = format!(
+            "{} ({}@{})",
+            remote_path.trim_end_matches('/').rsplit('/').next().unwrap_or(&remote_path),
+            connection.username,
+            connection.host
+        );
+
+        let profile = state
+            .workspace_manager
+            .open_remote(connection_id, &remote_path, display_name, embedded_workspace_id)?;
+
+        // Best-effort: a read-only remote directory shouldn't make opening it
+        // fail, it just won't carry the "re-open keeps the same id" marker.
+        let metadata_dir = format!("{}/.rock_desk", remote_path.trim_end_matches('/'));
+        if file_ops.create_dir(&metadata_dir).await.is_ok() {
+            let metadata_json = serde_json::json!({
+                "workspace_id": profile.id,
+                "kind": "remote",
+                "root_path": profile.root_path,
+                "connection_id": connection_id,
+            });
+            let _ = file_ops
+                .write_file(&format!("{metadata_dir}/workspace.json"), &metadata_json.to_string(), None)
+                .await;
+        }
+
+        let handle = WorkspaceHandle {
+            profile: profile.clone(),
+            file_ops,
         };
         state.open_workspaces.write().await.insert(profile.id, handle);
         Ok(profile)
