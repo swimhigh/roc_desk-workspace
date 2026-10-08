@@ -17,15 +17,15 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use roc_desk_common::change_store::{ChangeStatus, ChangeStore, CodingTarget, FileChange};
 use roc_desk_common::fsops::FileOps;
 use roc_desk_core::error::AppError;
 use roc_desk_core::workspace::WorkspaceKind;
 
-use super::changes::{ChangeStatus, ChangeStore, FileChange};
+use super::git_ops::SshGitCommitter;
 use super::history::{CodingHistoryRepo, CodingHistorySummary, WorkspaceHistorySnapshot};
 use super::session::{CodingMode, CodingSession};
 use super::skills::SkillMeta;
-use super::target::CodingTarget;
 use super::tools::TodoItem;
 use crate::WorkspaceAppState;
 
@@ -281,13 +281,20 @@ pub(crate) async fn build_new_session(
         probe_workspace(workspace_id, &profile.root_path, file_ops.as_ref()).await;
 
     let id = override_id.unwrap_or_else(Uuid::new_v4);
-    let change_store = Arc::new(Mutex::new(ChangeStore::new(
+    let mut change_store = ChangeStore::new(
         id,
         profile.root_path.clone(),
         target.clone(),
         file_ops.clone(),
         false,
-    )));
+    );
+    if let Some(ssh) = state.ssh.as_ref() {
+        change_store = change_store.with_committer(Arc::new(SshGitCommitter::new(
+            ssh.ssh_pool.clone(),
+            ssh.agent_pool.clone(),
+        )));
+    }
+    let change_store = Arc::new(Mutex::new(change_store));
     let mut session = CodingSession::new(
         id,
         workspace_id,

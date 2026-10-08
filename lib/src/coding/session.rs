@@ -13,6 +13,7 @@ use roc_desk_common::agent_confirm::{CommandConfirmRegistry, QuestionRegistry};
 use roc_desk_common::agent_llm;
 use roc_desk_common::ai::attachments::{build_user_message_content, ChatAttachment};
 use roc_desk_common::ai::{search_web_results, AiProvider, AiProviderManager};
+use roc_desk_common::change_store::{ChangeStatus, ChangeStore, CodingTarget};
 use roc_desk_common::fsops::{search_stream, FileOps, SearchMode, SearchOptions};
 use roc_desk_common::symbols::{build_index, SymbolIndex, SymbolLocation};
 use roc_desk_core::error::AppError;
@@ -20,14 +21,12 @@ use roc_desk_ssh::agent::AgentConnectionPool;
 use roc_desk_ssh::ssh::SshConnectionPool;
 
 use super::audit::AuditLogRepo;
-use super::changes::{ChangeStatus, ChangeStore};
 use super::evidence::{AiEvidenceRepo, EvidenceEntry, MAX_EVIDENCE_BYTES};
 use super::git_ops;
 use super::guard;
 use super::mcp::McpServerManager;
 use super::permission::{Decision, PermissionEngine, PermissionRulesRepo};
 use super::skills::{self, SkillMeta};
-use super::target::CodingTarget;
 use super::tools::{self, TodoItem, ToolCall};
 use super::webfetch;
 
@@ -1041,7 +1040,7 @@ impl CodingSession {
                 search_web_results(&reqwest::Client::new(), &query).await
             }
             ToolCall::WriteFile { path, content } => {
-                self.stage_change(&path, content, ssh_pool, agent_pool, app_handle)
+                self.stage_change(&path, content, app_handle)
                     .await
             }
             ToolCall::EditFile {
@@ -1058,7 +1057,7 @@ impl CodingSession {
                         "edit_file 失败：在 {path} 中没有找到匹配的 old_text，请先用 read_file 确认现有内容"
                     ))
                 })?;
-                self.stage_change(&path, updated, ssh_pool, agent_pool, app_handle)
+                self.stage_change(&path, updated, app_handle)
                     .await
             }
             ToolCall::RunCommand { command } => {
@@ -1112,7 +1111,7 @@ impl CodingSession {
                         }
                     };
                 }
-                self.stage_change(&path, content, ssh_pool, agent_pool, app_handle)
+                self.stage_change(&path, content, app_handle)
                     .await
             }
             ToolCall::GitStatus { path } => Ok(agent_llm::cap_tool_result(
@@ -1439,16 +1438,14 @@ impl CodingSession {
         &mut self,
         path: &str,
         new_content: String,
-        ssh_pool: &SshConnectionPool,
-        agent_pool: &AgentConnectionPool,
         app_handle: &AppHandle,
     ) -> Result<String, AppError> {
         let turn_id = self.current_turn_id;
-        let (change, sync) = self
+        let (change, sync, commit) = self
             .change_store
             .lock()
             .await
-            .stage(path, new_content, turn_id, ssh_pool, agent_pool, app_handle)
+            .stage(path, new_content, turn_id)
             .await?;
         let id = change.id;
         let applied = sync.is_some();
@@ -1457,6 +1454,12 @@ impl CodingSession {
             "coding:file-change",
             json!({ "sessionId": self.id, "change": &change, "sync": sync }),
         );
+        if let Some(commit) = commit {
+            let _ = app_handle.emit(
+                "coding:git-commit-result",
+                json!({ "sessionId": self.id, "path": commit.path, "output": commit.output }),
+            );
+        }
         Ok(if applied {
             format!("已为 {path} 生成变更（id={id}），已直接写入磁盘，用户可在界面上点\"撤销\"。")
         } else {

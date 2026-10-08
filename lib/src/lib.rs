@@ -279,14 +279,14 @@ impl WorkspaceAppState {
 pub mod cmd {
     use std::sync::Arc;
 
-    use tauri::{AppHandle, State};
+    use tauri::{AppHandle, Emitter, State};
     use tokio::sync::Mutex;
     use uuid::Uuid;
 
     use roc_desk_core::error::AppError;
     use roc_desk_core::workspace::WorkspaceProfile;
 
-    use crate::coding::changes::{ChangeStatus, FileChange, FileSyncInfo};
+    use roc_desk_common::change_store::{ChangeStatus, CodingTarget, FileChange, FileSyncInfo};
     use crate::coding::commands::{
         build_new_session, clear_probe_cache, get_change_store, get_session,
         history_list_with_import, maybe_auto_continue, refresh_history_from_workspace,
@@ -299,7 +299,6 @@ pub mod cmd {
     use crate::coding::permission::{Decision, PermissionRule};
     use crate::coding::session::{CodingMode, PendingInjection};
     use crate::coding::skills::SkillMeta;
-    use crate::coding::target::CodingTarget;
     use roc_desk_common::ai::attachments::ChatAttachment;
     use roc_desk_common::ai::{AiProvider, AiProviderInput};
     use roc_desk_common::fsops::FileOps;
@@ -1198,15 +1197,15 @@ pub mod cmd {
         workspace_id: Uuid,
         change_id: Uuid,
     ) -> Result<FileSyncInfo, AppError> {
-        let ssh = state
-            .ssh
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("远程工作区功能未启用".into()))?;
-        let ssh_pool = ssh.ssh_pool.clone();
-        let agent_pool = ssh.agent_pool.clone();
         let store = get_change_store(&state, workspace_id).await?;
         let mut guard = store.lock().await;
-        let result = guard.accept(change_id, &ssh_pool, &agent_pool, &app_handle).await;
+        let result = guard.accept(change_id).await;
+        if let Ok((_, Some(commit))) = &result {
+            let _ = app_handle.emit(
+                "coding:git-commit-result",
+                serde_json::json!({ "sessionId": guard.session_id(), "path": commit.path, "output": commit.output }),
+            );
+        }
         if result.is_ok() {
             if let Some(turn_id) = guard.changes().iter().find(|c| c.id == change_id).map(|c| c.turn_id) {
                 let still_pending = guard
@@ -1219,7 +1218,7 @@ pub mod cmd {
                 }
             }
         }
-        result
+        result.map(|(sync, _)| sync)
     }
 
     #[tauri::command]

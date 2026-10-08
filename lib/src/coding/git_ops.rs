@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use roc_desk_common::change_store::{CodingTarget, GitCommitter};
 use roc_desk_core::error::AppError;
 use roc_desk_ssh::agent::AgentConnectionPool;
 use roc_desk_ssh::ssh::SshConnectionPool;
 
 use super::local_exec::{run_local_command, shell_quote};
-use super::target::CodingTarget;
 
 /// AI coding agent's Git integration: commits exactly once per Accept'd
 /// change, nothing more -- no branch management, no conflict handling, no
@@ -175,4 +178,44 @@ pub async fn diff(
     } else {
         out
     })
+}
+
+/// This crate's [`GitCommitter`] implementation for `roc_desk_common::change_store::ChangeStore`
+/// -- the whole reason that trait exists is so `roc_desk_common` never needs
+/// a direct dependency on `roc_desk-ssh`; this is where the two actually
+/// get wired together, using the exact same connection pools the rest of
+/// this crate's coding-agent tools already share.
+pub struct SshGitCommitter {
+    ssh_pool: Arc<SshConnectionPool>,
+    agent_pool: Arc<AgentConnectionPool>,
+}
+
+impl SshGitCommitter {
+    pub fn new(ssh_pool: Arc<SshConnectionPool>, agent_pool: Arc<AgentConnectionPool>) -> Self {
+        Self {
+            ssh_pool,
+            agent_pool,
+        }
+    }
+}
+
+#[async_trait]
+impl GitCommitter for SshGitCommitter {
+    async fn commit_file(
+        &self,
+        target: &CodingTarget,
+        workspace_root: &str,
+        path: &str,
+        message: &str,
+    ) -> Result<String, AppError> {
+        commit_file(
+            target,
+            workspace_root,
+            path,
+            message,
+            &self.ssh_pool,
+            &self.agent_pool,
+        )
+        .await
+    }
 }
