@@ -1,16 +1,15 @@
-//! Coding workspace: local terminal, Git panel, and workspace/recent-folder
-//! tracking for opening a local folder as a coding workspace.
+//! Coding workspace: local terminal, Git panel, workspace/recent-folder
+//! tracking, and a full AI coding agent (multi-turn tool-calling loop,
+//! file-change staging/undo, permission rules, MCP servers, conversation
+//! history).
 //!
 //! ## Migration status (see the repository README / host's
-//! `docs/MULTI_REPO_SPLIT_PROGRESS.md` "编程工作区" section for the full
-//! writeup)
+//! `docs/MULTI_REPO_SPLIT_PROGRESS.md` "编程工作区"/"AI 编程助手迁移"
+//! sections for the full writeup)
 //!
-//! Ported and command-tested via `cargo check`:
-//! - Workspace concept (open a local folder, remember it in a "recent"
-//!   list) -- backed by the newly added `roc_desk_core::workspace` (this
-//!   crate is its first consumer; the module lives in `roc_desk-common`
-//!   because the plan classifies it as a kernel concept shared by multiple
-//!   tools, even though only this tool uses it today).
+//! Ported and command-tested via `cargo check`/`cargo test`:
+//! - Workspace concept (open a local or remote folder, remember it in a
+//!   "recent" list) -- backed by `roc_desk_core::workspace`.
 //! - Local terminal (`pty`), ported 1:1 from the host.
 //! - A local-only Git panel backend (`git`): status/diff/log/commit,
 //!   talking to the `git` binary directly via argv.
@@ -20,31 +19,24 @@
 //!   `roc_desk-explorer`). `standalone/src/main.rs` registers
 //!   `roc_desk_explorer::cmd::*` and `roc_desk_editor::symbols::editor_symbols_*`
 //!   directly alongside this crate's own commands.
+//! - The AI coding agent (`coding::session::CodingSession`'s multi-turn
+//!   tool-calling loop, all ~24 tools, permission-gated command execution,
+//!   file-change Diff/Accept/Undo/Redo staging, MCP server management,
+//!   Skills import, conversation history persisted both to this tool's own
+//!   SQLite file and as a workspace-portable `.rock_desk/sessions/*.json`
+//!   mirror) -- the full `commands/coding.rs` command surface is wired up
+//!   in [`cmd`], backed by [`WorkspaceAppState`]'s `coding_*`/`ai_*`/
+//!   `mcp_manager`/`permission_rules` fields. Requires
+//!   [`WorkspaceAppState::with_ssh`] to have been called even for a purely
+//!   local coding session -- see that field's doc comment for why.
 //!
-//! **Not ported in this pass** (left as host-only, not stubbed with fake
-//! implementations):
-//! - The AI programming assistant's multi-turn Agent loop and tool
-//!   definitions (host's `coding::session`/`coding::tools`, ~3500 lines) --
-//!   these depend on host-only `crate::ai`/`crate::agent_llm` (Provider
-//!   management, LLM call/streaming/retry) that has not been ported into
-//!   `roc_desk_core` yet, and the Agent loop itself is deeply coding-specific
-//!   (tool definitions, permission gating, change-staging with undo). This
-//!   was judged too large to attempt safely alongside everything else in
-//!   this pass -- see the task's final report for the full reasoning.
-//! - Remote (SSH/Agent) *workspace opening* is now supported (see
-//!   `WorkspaceAppState::with_ssh`, `cmd::workspace_open_remote`) -- but
-//!   remote *terminal sessions* (`pty_*` only ever spawns a local shell) and
+//! **Not ported** (left as host-only, not stubbed with fake implementations):
+//! - Remote *terminal sessions* (`pty_*` only ever spawns a local shell) and
 //!   the Git panel (`git_*` only ever shells out locally) are still
-//!   local-only; those would need their own remote execution path
-//!   (`roc_desk_ssh::ssh::session`/`agent::session` exec), not attempted
-//!   here.
-//! - Skills archive import (`coding::skills`) and web fetch
-//!   (`coding::webfetch`) -- lower priority per the task brief, skipped to
-//!   keep scope manageable.
-//! - File-change diff/undo staging (`coding::changes`/`coding::diff`) --
-//!   this exists in the host specifically to stage the AI Agent's proposed
-//!   edits for accept/reject/undo; without the Agent loop there is no
-//!   producer for it in this pass, so it was not ported either.
+//!   local-only, independent of the AI coding agent being able to target a
+//!   remote/Agent workspace; those would need their own remote execution
+//!   path (`roc_desk_ssh::ssh::session`/`agent::session` exec), not
+//!   attempted here.
 
 pub const TOOL_NAME: &str = "roc_desk-workspace";
 pub const TOOL_DESCRIPTION: &str = "编程工作区：代码、终端与 Git";
@@ -71,7 +63,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use roc_desk_core::error::AppError;
@@ -88,6 +80,12 @@ use roc_desk_common::fsops::FileOps;
 pub struct WorkspaceHandle {
     pub profile: WorkspaceProfile,
     pub file_ops: Arc<dyn FileOps>,
+    /// Best-effort local mirror directory for data that's primarily stored
+    /// in the workspace itself (e.g. `coding::history`'s workspace-portable
+    /// session snapshots) -- `WorkspaceManager::cache_root().join(profile.id)`,
+    /// the same per-workspace fallback directory `WorkspaceManager` itself
+    /// uses for its own `workspace.json` fallback copy.
+    pub fallback_cache_dir: PathBuf,
 }
 
 /// Remote (SSH/Agent) connection pools, needed to resolve a `connection_id`
@@ -126,26 +124,106 @@ pub struct WorkspaceAppState {
     pub open_workspaces: Arc<RwLock<HashMap<Uuid, WorkspaceHandle>>>,
     /// `None` until [`WorkspaceAppState::with_ssh`] is called -- remote
     /// workspace commands return a clear "not enabled" error rather than
-    /// panicking when this hasn't been wired up.
+    /// panicking when this hasn't been wired up. The AI coding agent's
+    /// command layer also requires this to be set even for a purely local
+    /// session -- `CodingSession::send_message`'s signature always takes
+    /// concrete `SshConnectionPool`/`AgentConnectionPool` references (unused
+    /// on the `CodingTarget::Local` path, but still part of the call), so
+    /// there is no meaningful way to call it without *some* pools to pass,
+    /// and this crate has no way to construct placeholder ones of its own
+    /// (see [`SshPools`]'s doc for why constructing them here would be
+    /// wrong regardless).
     pub ssh: Option<SshPools>,
+    /// AI coding agent session, keyed by workspace id -- at most one active
+    /// session per workspace.
+    pub coding_sessions: Arc<RwLock<HashMap<Uuid, Arc<Mutex<coding::CodingSession>>>>>,
+    /// File-change (Diff/Accept/Undo/Redo) state, keyed by workspace id same
+    /// as `coding_sessions` but deliberately a separate lock -- so that
+    /// accepting/rejecting one file change never has to wait behind a
+    /// possibly minutes-long AI conversation turn holding `coding_sessions`'s
+    /// lock. See `coding::changes::ChangeStore`'s doc comment.
+    pub coding_changes: Arc<RwLock<HashMap<Uuid, Arc<Mutex<coding::ChangeStore>>>>>,
+    pub coding_history: Arc<coding::history::CodingHistoryRepo>,
+    pub ai_evidence: Arc<coding::evidence::AiEvidenceRepo>,
+    pub audit_log: Arc<coding::audit::AuditLogRepo>,
+    pub permission_rules: Arc<coding::permission::PermissionRulesRepo>,
+    pub mcp_manager: Arc<coding::mcp::McpServerManager>,
+    pub ai_provider_manager: Arc<roc_desk_common::ai::AiProviderManager>,
+    pub command_confirms: roc_desk_common::agent_confirm::CommandConfirmRegistry,
+    pub question_confirms: roc_desk_common::agent_confirm::QuestionRegistry,
+    /// "Stop" button cancellation signal, keyed by workspace id -- lives
+    /// independent of `coding_sessions`'s lock for the same reason as the
+    /// host's `AppState.coding_cancel_tokens`: `coding_send_message` holds
+    /// that lock for the whole turn, so a cancel command sharing it would
+    /// be stuck behind the very thing it's trying to interrupt.
+    pub coding_cancel_tokens:
+        Arc<std::sync::Mutex<HashMap<Uuid, tokio_util::sync::CancellationToken>>>,
+    pub coding_pending_injections:
+        Arc<std::sync::Mutex<HashMap<Uuid, Vec<coding::PendingInjection>>>>,
+    pub symbol_indexes: Arc<RwLock<HashMap<Uuid, roc_desk_common::symbols::SymbolIndex>>>,
 }
 
 impl WorkspaceAppState {
     /// `db_path` is this tool's own SQLite file (the "recent workspaces"
-    /// list); `cache_root` is where the fallback `.rock_desk` workspace
-    /// metadata cache directory lives (mirrors the host's
-    /// `WorkspaceManager::new`). Remote workspace support starts disabled --
-    /// see [`WorkspaceAppState::with_ssh`].
+    /// list, plus every other AI-coding-agent table added in this phase --
+    /// one file per tool, same convention as `roc_desk-ssh`/`roc_desk-sql`);
+    /// `cache_root` is where the fallback `.rock_desk` workspace metadata
+    /// cache directory lives (mirrors the host's `WorkspaceManager::new`).
+    /// Remote workspace support starts disabled -- see
+    /// [`WorkspaceAppState::with_ssh`].
     pub fn new(db_path: &std::path::Path, cache_root: PathBuf) -> Result<Self, AppError> {
         let pool = roc_desk_core::db::pool::create_pool(db_path)?;
-        let repo = roc_desk_core::workspace::WorkspaceRepo::new(pool);
+        let repo = roc_desk_core::workspace::WorkspaceRepo::new(pool.clone());
         let workspace_manager = WorkspaceManager::new(repo, cache_root);
         workspace_manager.ensure_schema()?;
+
+        let credential_store: Arc<dyn roc_desk_core::credential::CredentialStore> =
+            Arc::new(roc_desk_core::credential::KeyringStore);
+
+        let ai_providers_repo = Arc::new(roc_desk_common::ai::AiProvidersRepo::new(pool.clone()));
+        ai_providers_repo.ensure_schema()?;
+        let ai_provider_manager = Arc::new(roc_desk_common::ai::AiProviderManager::new(
+            ai_providers_repo,
+            credential_store.clone(),
+        ));
+
+        let mcp_servers_repo = Arc::new(coding::mcp::McpServersRepo::new(pool.clone()));
+        mcp_servers_repo.ensure_schema()?;
+        let mcp_manager = Arc::new(coding::mcp::McpServerManager::new(
+            mcp_servers_repo,
+            credential_store,
+        ));
+
+        let permission_rules = Arc::new(coding::permission::PermissionRulesRepo::new(pool.clone()));
+        permission_rules.ensure_schema()?;
+
+        let audit_log = Arc::new(coding::audit::AuditLogRepo::new(pool.clone()));
+        audit_log.ensure_schema()?;
+
+        let ai_evidence = Arc::new(coding::evidence::AiEvidenceRepo::new(pool.clone()));
+        ai_evidence.ensure_schema()?;
+
+        let coding_history = Arc::new(coding::history::CodingHistoryRepo::new(pool));
+        coding_history.ensure_schema()?;
+
         Ok(Self {
             workspace_manager,
             local_pty: std::sync::Arc::new(pty::LocalPtyManager::default()),
             open_workspaces: Arc::new(RwLock::new(HashMap::new())),
             ssh: None,
+            coding_sessions: Arc::new(RwLock::new(HashMap::new())),
+            coding_changes: Arc::new(RwLock::new(HashMap::new())),
+            coding_history,
+            ai_evidence,
+            audit_log,
+            permission_rules,
+            mcp_manager,
+            ai_provider_manager,
+            command_confirms: roc_desk_common::agent_confirm::CommandConfirmRegistry::default(),
+            question_confirms: roc_desk_common::agent_confirm::QuestionRegistry::default(),
+            coding_cancel_tokens: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            coding_pending_injections: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            symbol_indexes: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -199,11 +277,31 @@ impl WorkspaceAppState {
 /// scope, which collide at crate root (`E0255`). `standalone/src/main.rs`
 /// and the host reference these as `roc_desk_workspace::cmd::pty_open`, etc.
 pub mod cmd {
+    use std::sync::Arc;
+
     use tauri::{AppHandle, State};
+    use tokio::sync::Mutex;
     use uuid::Uuid;
 
     use roc_desk_core::error::AppError;
     use roc_desk_core::workspace::WorkspaceProfile;
+
+    use crate::coding::changes::{ChangeStatus, FileChange, FileSyncInfo};
+    use crate::coding::commands::{
+        build_new_session, clear_probe_cache, get_change_store, get_session,
+        history_list_with_import, maybe_auto_continue, refresh_history_from_workspace,
+        session_info, CodingSessionInfo, TempDirGuard,
+    };
+    use crate::coding::history::{
+        CodingHistoryDetail, CodingHistoryInput, CodingHistorySummary, WorkspaceHistorySnapshot,
+    };
+    use crate::coding::mcp::{McpServer, McpServerInput};
+    use crate::coding::permission::{Decision, PermissionRule};
+    use crate::coding::session::{CodingMode, PendingInjection};
+    use crate::coding::skills::SkillMeta;
+    use crate::coding::target::CodingTarget;
+    use roc_desk_common::ai::attachments::ChatAttachment;
+    use roc_desk_common::fsops::FileOps;
 
     use crate::{WorkspaceAppState, WorkspaceHandle};
 
@@ -228,6 +326,10 @@ pub mod cmd {
         let handle = WorkspaceHandle {
             profile: profile.clone(),
             file_ops: std::sync::Arc::new(roc_desk_common::fsops::local::LocalFileOps),
+            fallback_cache_dir: state
+                .workspace_manager
+                .cache_root()
+                .join(profile.id.to_string()),
         };
         state.open_workspaces.write().await.insert(profile.id, handle);
         Ok(profile)
@@ -300,6 +402,10 @@ pub mod cmd {
         let handle = WorkspaceHandle {
             profile: profile.clone(),
             file_ops,
+            fallback_cache_dir: state
+                .workspace_manager
+                .cache_root()
+                .join(profile.id.to_string()),
         };
         state.open_workspaces.write().await.insert(profile.id, handle);
         Ok(profile)
@@ -434,5 +540,879 @@ pub mod cmd {
         message: String,
     ) -> Result<String, AppError> {
         crate::git::commit_paths(&cwd, &paths, &message).await
+    }
+
+    // -----------------------------------------------------------------------
+    // AI coding agent -- session lifecycle
+    // -----------------------------------------------------------------------
+
+    fn require_ssh(state: &State<'_, WorkspaceAppState>) -> Result<(), AppError> {
+        if state.ssh.is_none() {
+            return Err(AppError::Internal(
+                "AI 编程助手功能未启用（远程连接池未配置）".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn coding_set_provider(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        provider_id: Uuid,
+    ) -> Result<(), AppError> {
+        if state.ai_provider_manager.get(provider_id)?.is_none() {
+            return Err(AppError::NotFound(format!(
+                "ai provider not found: {provider_id}"
+            )));
+        }
+        let session = get_session(&state, workspace_id).await?;
+        let mut guard = session.lock().await;
+        guard.provider_id = provider_id;
+        Ok(())
+    }
+
+    /// Auto-binds (or reuses an existing) coding agent session to the
+    /// current workspace.
+    #[tauri::command]
+    pub async fn coding_start(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        provider_id: Uuid,
+    ) -> Result<CodingSessionInfo, AppError> {
+        require_ssh(&state)?;
+        if state.ai_provider_manager.get(provider_id)?.is_none() {
+            return Err(AppError::NotFound(format!(
+                "ai provider not found: {provider_id}"
+            )));
+        }
+
+        let workspaces = state.open_workspaces.read().await;
+        let handle = workspaces
+            .get(&workspace_id)
+            .ok_or_else(|| AppError::NotFound(format!("workspace not opened: {workspace_id}")))?;
+        let profile = handle.profile.clone();
+        drop(workspaces);
+
+        if let Some(existing) = state
+            .coding_sessions
+            .read()
+            .await
+            .get(&workspace_id)
+            .cloned()
+        {
+            let guard = existing.lock().await;
+            let target_matches = match (&guard.target, profile.kind, profile.connection_id) {
+                (CodingTarget::Local, roc_desk_core::workspace::WorkspaceKind::Local, None) => true,
+                (
+                    CodingTarget::Remote { connection_id, .. },
+                    roc_desk_core::workspace::WorkspaceKind::Remote,
+                    Some(expected),
+                ) => *connection_id == expected,
+                (
+                    CodingTarget::Agent { connection_id, .. },
+                    roc_desk_core::workspace::WorkspaceKind::Remote,
+                    Some(expected),
+                ) => *connection_id == expected,
+                _ => false,
+            };
+            if target_matches && guard.workspace_root == profile.root_path {
+                if state.ai_provider_manager.get(guard.provider_id)?.is_some() {
+                    return Ok(session_info(&guard).await);
+                }
+                drop(guard);
+                let mut guard = existing.lock().await;
+                guard.provider_id = provider_id;
+                return Ok(session_info(&guard).await);
+            }
+            drop(guard);
+            state.coding_sessions.write().await.remove(&workspace_id);
+        }
+
+        let (session, change_store) =
+            build_new_session(&state, workspace_id, provider_id, true, None).await?;
+        let info = session_info(&session).await;
+        state
+            .coding_sessions
+            .write()
+            .await
+            .insert(workspace_id, Arc::new(Mutex::new(session)));
+        state
+            .coding_changes
+            .write()
+            .await
+            .insert(workspace_id, change_store);
+        Ok(info)
+    }
+
+    #[tauri::command]
+    pub async fn coding_new_session(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        provider_id: Uuid,
+    ) -> Result<CodingSessionInfo, AppError> {
+        require_ssh(&state)?;
+        if state.ai_provider_manager.get(provider_id)?.is_none() {
+            return Err(AppError::NotFound(format!(
+                "ai provider not found: {provider_id}"
+            )));
+        }
+        state.coding_sessions.write().await.remove(&workspace_id);
+        state.coding_changes.write().await.remove(&workspace_id);
+        state
+            .coding_pending_injections
+            .lock()
+            .unwrap()
+            .remove(&workspace_id);
+        let (session, change_store) =
+            build_new_session(&state, workspace_id, provider_id, false, None).await?;
+        let info = session_info(&session).await;
+        state
+            .coding_sessions
+            .write()
+            .await
+            .insert(workspace_id, Arc::new(Mutex::new(session)));
+        state
+            .coding_changes
+            .write()
+            .await
+            .insert(workspace_id, change_store);
+        Ok(info)
+    }
+
+    /// Releases a workspace's resident coding agent session (frontend's
+    /// bounded-LRU eviction, or when the workspace itself is closed).
+    /// Session memory is simply dropped -- conversation content is already
+    /// persisted after every `sendMessage`/`acceptChange` etc. via
+    /// `coding_history_save`, no "save before closing" step needed here.
+    #[tauri::command]
+    pub async fn coding_close(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+    ) -> Result<(), AppError> {
+        state.coding_sessions.write().await.remove(&workspace_id);
+        state.coding_changes.write().await.remove(&workspace_id);
+        state
+            .coding_pending_injections
+            .lock()
+            .unwrap()
+            .remove(&workspace_id);
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn coding_set_mode(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        mode: CodingMode,
+    ) -> Result<(), AppError> {
+        let session = get_session(&state, workspace_id).await?;
+        let mut session = session.lock().await;
+        session.mode = mode;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // AI coding agent -- per-session toggles (own `ChangeStore` lock, never
+    // the `CodingSession` lock `send_message` may hold for a long turn)
+    // -----------------------------------------------------------------------
+
+    #[tauri::command]
+    pub async fn coding_set_auto_allow_readonly(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        enabled: bool,
+    ) -> Result<(), AppError> {
+        let store = get_change_store(&state, workspace_id).await?;
+        store
+            .lock()
+            .await
+            .auto_allow_readonly
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn coding_set_auto_git_commit(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        enabled: bool,
+    ) -> Result<(), AppError> {
+        let ssh = state
+            .ssh
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("远程工作区功能未启用".into()))?;
+        let ssh_pool = ssh.ssh_pool.clone();
+        let agent_pool = ssh.agent_pool.clone();
+        let store = get_change_store(&state, workspace_id).await?;
+        {
+            let mut guard = store.lock().await;
+            if enabled && !guard.git_repo() {
+                let target = guard.target().clone();
+                let workspace_root = guard.workspace_root().to_string();
+                drop(guard);
+                let git_repo = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    crate::coding::git_ops::is_git_repo(
+                        &target,
+                        &workspace_root,
+                        &ssh_pool,
+                        &agent_pool,
+                    ),
+                )
+                .await
+                .unwrap_or(false);
+                if !git_repo {
+                    return Err(AppError::Internal(
+                        "当前工作区不是 Git 仓库，无法开启自动提交".to_string(),
+                    ));
+                }
+                guard = store.lock().await;
+                guard.set_git_repo(true);
+            }
+            guard.auto_git_commit = enabled;
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn coding_set_full_auto(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        enabled: bool,
+    ) -> Result<(), AppError> {
+        let store = get_change_store(&state, workspace_id).await?;
+        let session_id = {
+            let store = store.lock().await;
+            store
+                .full_auto
+                .store(enabled, std::sync::atomic::Ordering::Relaxed);
+            store.session_id()
+        };
+        if enabled {
+            state.command_confirms.allow_session(session_id).await;
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn coding_set_auto_apply_changes(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        enabled: bool,
+    ) -> Result<(), AppError> {
+        let store = get_change_store(&state, workspace_id).await?;
+        store
+            .lock()
+            .await
+            .auto_apply_changes
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // AI coding agent -- conversation
+    // -----------------------------------------------------------------------
+
+    #[tauri::command]
+    pub async fn coding_send_message(
+        state: State<'_, WorkspaceAppState>,
+        app_handle: AppHandle,
+        workspace_id: Uuid,
+        text: String,
+        attachments: Option<Vec<ChatAttachment>>,
+    ) -> Result<String, AppError> {
+        let session = get_session(&state, workspace_id).await?;
+        let ssh = state
+            .ssh
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("远程工作区功能未启用".into()))?;
+        let ssh_pool = ssh.ssh_pool.clone();
+        let agent_pool = ssh.agent_pool.clone();
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        state
+            .coding_cancel_tokens
+            .lock()
+            .unwrap()
+            .insert(workspace_id, cancel_token.clone());
+        let mut session = session.lock().await;
+        let result = session
+            .send_message(
+                &text,
+                &attachments.unwrap_or_default(),
+                &state.ai_provider_manager,
+                &ssh_pool,
+                &agent_pool,
+                &state.audit_log,
+                &state.command_confirms,
+                &state.permission_rules,
+                &state.question_confirms,
+                &state.mcp_manager,
+                &app_handle,
+                &cancel_token,
+                &state.coding_pending_injections,
+                &state.symbol_indexes,
+            )
+            .await;
+        state
+            .coding_cancel_tokens
+            .lock()
+            .unwrap()
+            .remove(&workspace_id);
+        result
+    }
+
+    #[tauri::command]
+    pub async fn coding_cancel_turn(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+    ) -> Result<(), AppError> {
+        if let Some(token) = state.coding_cancel_tokens.lock().unwrap().get(&workspace_id) {
+            token.cancel();
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn coding_inject_message(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        text: String,
+        attachments: Option<Vec<ChatAttachment>>,
+    ) -> Result<(), AppError> {
+        let attachments = attachments.unwrap_or_default();
+        if text.trim().is_empty() && attachments.is_empty() {
+            return Ok(());
+        }
+        state
+            .coding_pending_injections
+            .lock()
+            .unwrap()
+            .entry(workspace_id)
+            .or_default()
+            .push(PendingInjection { text, attachments });
+        Ok(())
+    }
+
+    const OPTIMIZE_PROMPT_SYSTEM: &str =
+        "你是一个提示词优化助手，任务是把用户写给 AI 编程助手的草稿指令改写得更清晰、具体、可执行。\
+         要求：1) 保留用户的原始意图，不要编造用户没提到的具体文件名/路径/技术选型等事实性细节；\
+         2) 把模糊的描述具体化，必要时补充\"预期效果\"\"验收标准\"这类结构，让编程助手能一次理解到位；\
+         3) 只输出改写后的指令本身，不要输出任何解释、前后缀说明或引号。";
+
+    #[tauri::command]
+    pub async fn coding_optimize_prompt(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        text: String,
+    ) -> Result<String, AppError> {
+        let session = get_session(&state, workspace_id).await?;
+        let provider_id = session.lock().await.provider_id;
+        let provider = state
+            .ai_provider_manager
+            .get(provider_id)?
+            .ok_or_else(|| AppError::NotFound(format!("ai provider not found: {provider_id}")))?;
+        let api_key = state.ai_provider_manager.resolve_api_key(&provider).await?;
+        roc_desk_common::ai::AiChatClient::new()
+            .complete_once(&provider, api_key.as_deref(), OPTIMIZE_PROMPT_SYSTEM, &text)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn coding_answer_question(
+        state: State<'_, WorkspaceAppState>,
+        request_id: Uuid,
+        answer: String,
+    ) -> Result<(), AppError> {
+        state.question_confirms.resolve(request_id, answer).await;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // AI coding agent -- permission rules
+    // -----------------------------------------------------------------------
+
+    #[tauri::command]
+    pub async fn permission_rule_list(
+        state: State<'_, WorkspaceAppState>,
+    ) -> Result<Vec<PermissionRule>, AppError> {
+        state.permission_rules.list()
+    }
+
+    #[derive(serde::Deserialize)]
+    pub struct PermissionRuleInput {
+        pub tool: String,
+        pub pattern: String,
+        pub decision: String,
+    }
+
+    #[tauri::command]
+    pub async fn permission_rule_create(
+        state: State<'_, WorkspaceAppState>,
+        input: PermissionRuleInput,
+    ) -> Result<PermissionRule, AppError> {
+        let rule = PermissionRule {
+            id: Uuid::new_v4(),
+            tool: input.tool,
+            pattern: input.pattern,
+            decision: Decision::from_str(&input.decision),
+            enabled: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        state.permission_rules.create(&rule)?;
+        Ok(rule)
+    }
+
+    #[tauri::command]
+    pub async fn permission_rule_delete(
+        state: State<'_, WorkspaceAppState>,
+        id: Uuid,
+    ) -> Result<(), AppError> {
+        state.permission_rules.delete(id)
+    }
+
+    // -----------------------------------------------------------------------
+    // AI coding agent -- MCP server management
+    // -----------------------------------------------------------------------
+
+    #[tauri::command]
+    pub async fn mcp_server_list(
+        state: State<'_, WorkspaceAppState>,
+    ) -> Result<Vec<McpServer>, AppError> {
+        state.mcp_manager.list()
+    }
+
+    #[tauri::command]
+    pub async fn mcp_server_create(
+        state: State<'_, WorkspaceAppState>,
+        input: McpServerInput,
+    ) -> Result<McpServer, AppError> {
+        state.mcp_manager.create(input).await
+    }
+
+    #[tauri::command]
+    pub async fn mcp_server_update(
+        state: State<'_, WorkspaceAppState>,
+        id: Uuid,
+        input: McpServerInput,
+    ) -> Result<McpServer, AppError> {
+        state.mcp_manager.update(id, input).await
+    }
+
+    #[tauri::command]
+    pub async fn mcp_server_delete(
+        state: State<'_, WorkspaceAppState>,
+        id: Uuid,
+    ) -> Result<(), AppError> {
+        state.mcp_manager.delete(id).await
+    }
+
+    // -----------------------------------------------------------------------
+    // AI coding agent -- Skills view/import
+    // -----------------------------------------------------------------------
+
+    #[tauri::command]
+    pub async fn skill_list(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+    ) -> Result<Vec<SkillMeta>, AppError> {
+        let handle = state
+            .open_workspaces
+            .read()
+            .await
+            .get(&workspace_id)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound(format!("workspace not opened: {workspace_id}")))?;
+        Ok(crate::coding::skills::discover_skills(handle.file_ops.as_ref(), &handle.profile.root_path).await)
+    }
+
+    #[tauri::command]
+    pub async fn skill_delete(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        name: String,
+    ) -> Result<(), AppError> {
+        let handle = state
+            .open_workspaces
+            .read()
+            .await
+            .get(&workspace_id)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound(format!("workspace not opened: {workspace_id}")))?;
+        let skills =
+            crate::coding::skills::discover_skills(handle.file_ops.as_ref(), &handle.profile.root_path).await;
+        let skill = skills
+            .into_iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| AppError::NotFound(format!("未找到技能：{name}")))?;
+        handle.file_ops.delete(&skill.dir, true).await?;
+        clear_probe_cache(workspace_id);
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn skill_import(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        local_path: String,
+    ) -> Result<SkillMeta, AppError> {
+        let handle = state
+            .open_workspaces
+            .read()
+            .await
+            .get(&workspace_id)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound(format!("workspace not opened: {workspace_id}")))?;
+
+        let raw_path = local_path.trim_end_matches(['/', '\\']).to_string();
+        let is_archive = crate::coding::skills::is_archive_path(&raw_path);
+        let (effective_path, _temp_guard) = if is_archive {
+            let extract_dir =
+                std::env::temp_dir().join(format!("roc_desk-skill-{}", Uuid::new_v4()));
+            let skill_root = crate::coding::skills::extract_skill_archive(
+                std::path::Path::new(&raw_path),
+                &extract_dir,
+            )?;
+            (
+                skill_root.to_string_lossy().into_owned(),
+                Some(TempDirGuard(extract_dir)),
+            )
+        } else {
+            (raw_path.clone(), None)
+        };
+
+        let local_ops = roc_desk_common::fsops::local::LocalFileOps;
+        let skill_md_content = local_ops
+            .read_file(&format!("{effective_path}/SKILL.md"))
+            .await
+            .map_err(|_| AppError::Internal(format!("{effective_path} 下没有找到 SKILL.md，不是一个合法的技能目录")))?;
+        let (fields, _) = crate::coding::skills::parse_frontmatter(&skill_md_content.text);
+        let folder_name = if is_archive {
+            let base = raw_path.rsplit(['/', '\\']).next().unwrap_or(&raw_path);
+            base.trim_end_matches(".zip")
+                .trim_end_matches(".tar.gz")
+                .trim_end_matches(".tgz")
+                .to_string()
+        } else {
+            effective_path
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&effective_path)
+                .to_string()
+        };
+        let name = fields.get("name").cloned().unwrap_or(folder_name);
+        let description = fields.get("description").cloned().unwrap_or_default();
+
+        let root = handle.profile.root_path.trim_end_matches(['/', '\\']);
+        let rock_desk_dir = format!("{root}/.rock_desk");
+        let skills_root = format!("{rock_desk_dir}/skills");
+        let dest = format!("{skills_root}/{name}");
+        let _ = handle.file_ops.create_dir(&rock_desk_dir).await;
+        let _ = handle.file_ops.create_dir(&skills_root).await;
+        if handle.file_ops.list_dir(&dest).await.is_ok() {
+            handle.file_ops.delete(&dest, true).await?;
+        }
+
+        let should_cancel = || false;
+        let file_count = std::sync::atomic::AtomicU64::new(0);
+        roc_desk_common::fsops::copy_between(
+            &local_ops,
+            &effective_path,
+            handle.file_ops.as_ref(),
+            &dest,
+            true,
+            &None,
+            &should_cancel,
+            &file_count,
+        )
+        .await?;
+
+        clear_probe_cache(workspace_id);
+        Ok(SkillMeta {
+            name,
+            description,
+            dir: dest,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // AI coding agent -- Accept/Reject/Undo/Redo/RevertTurn (own
+    // `ChangeStore` lock, never `CodingSession`'s -- see `coding_changes`'s
+    // field doc comment)
+    // -----------------------------------------------------------------------
+
+    #[tauri::command]
+    pub async fn coding_accept_change(
+        state: State<'_, WorkspaceAppState>,
+        app_handle: AppHandle,
+        workspace_id: Uuid,
+        change_id: Uuid,
+    ) -> Result<FileSyncInfo, AppError> {
+        let ssh = state
+            .ssh
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("远程工作区功能未启用".into()))?;
+        let ssh_pool = ssh.ssh_pool.clone();
+        let agent_pool = ssh.agent_pool.clone();
+        let store = get_change_store(&state, workspace_id).await?;
+        let mut guard = store.lock().await;
+        let result = guard.accept(change_id, &ssh_pool, &agent_pool, &app_handle).await;
+        if result.is_ok() {
+            if let Some(turn_id) = guard.changes().iter().find(|c| c.id == change_id).map(|c| c.turn_id) {
+                let still_pending = guard
+                    .changes()
+                    .iter()
+                    .any(|c| c.turn_id == turn_id && c.status == ChangeStatus::Pending);
+                drop(guard);
+                if !still_pending {
+                    maybe_auto_continue(&state, &app_handle, workspace_id, turn_id);
+                }
+            }
+        }
+        result
+    }
+
+    #[tauri::command]
+    pub async fn coding_reject_change(
+        state: State<'_, WorkspaceAppState>,
+        app_handle: AppHandle,
+        workspace_id: Uuid,
+        change_id: Uuid,
+    ) -> Result<(), AppError> {
+        let store = get_change_store(&state, workspace_id).await?;
+        let mut guard = store.lock().await;
+        let result = guard.reject(change_id);
+        if result.is_ok() {
+            if let Some(turn_id) = guard.changes().iter().find(|c| c.id == change_id).map(|c| c.turn_id) {
+                let still_pending = guard
+                    .changes()
+                    .iter()
+                    .any(|c| c.turn_id == turn_id && c.status == ChangeStatus::Pending);
+                drop(guard);
+                if !still_pending {
+                    maybe_auto_continue(&state, &app_handle, workspace_id, turn_id);
+                }
+            }
+        }
+        result
+    }
+
+    #[tauri::command]
+    pub async fn coding_undo_change(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        change_id: Uuid,
+    ) -> Result<FileSyncInfo, AppError> {
+        let store = get_change_store(&state, workspace_id).await?;
+        let mut guard = store.lock().await;
+        guard.undo(change_id).await
+    }
+
+    #[tauri::command]
+    pub async fn coding_redo_change(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+    ) -> Result<Option<FileSyncInfo>, AppError> {
+        let store = get_change_store(&state, workspace_id).await?;
+        let mut guard = store.lock().await;
+        guard.redo().await
+    }
+
+    #[tauri::command]
+    pub async fn coding_revert_turn(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        turn_id: Uuid,
+    ) -> Result<Vec<FileSyncInfo>, AppError> {
+        let store = get_change_store(&state, workspace_id).await?;
+        let mut guard = store.lock().await;
+        guard.revert_turn(turn_id).await
+    }
+
+    #[tauri::command]
+    pub async fn coding_confirm_command(
+        state: State<'_, WorkspaceAppState>,
+        request_id: Uuid,
+        allow: bool,
+    ) -> Result<(), AppError> {
+        state.command_confirms.resolve(request_id, allow).await;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // AI coding agent -- history
+    // -----------------------------------------------------------------------
+
+    #[tauri::command]
+    pub async fn coding_history_save(
+        state: State<'_, WorkspaceAppState>,
+        input: CodingHistoryInput,
+    ) -> Result<(), AppError> {
+        let mut input = input;
+        if let Some(session) = state
+            .coding_sessions
+            .read()
+            .await
+            .get(&input.workspace_id)
+            .cloned()
+        {
+            let messages = session.lock().await.messages_snapshot();
+            input.messages = serde_json::to_value(&messages).unwrap_or_default();
+        }
+        state.coding_history.save(&input)?;
+        if let Some(detail) = state.coding_history.get(input.id)? {
+            let snapshot = WorkspaceHistorySnapshot {
+                input: input.clone(),
+                created_at: detail.summary.created_at,
+                updated_at: detail.summary.updated_at,
+            };
+            if let Some(handle) = state
+                .open_workspaces
+                .read()
+                .await
+                .get(&input.workspace_id)
+                .cloned()
+            {
+                let dir = format!(
+                    "{}/.rock_desk/sessions",
+                    handle.profile.root_path.trim_end_matches(['/', '\\'])
+                );
+                let path = format!("{dir}/{}.json", input.id);
+                if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
+                    let history_id = input.id;
+                    tokio::spawn(async move {
+                        let mirrored = tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            async {
+                                handle
+                                    .file_ops
+                                    .create_dir(&format!(
+                                        "{}/.rock_desk",
+                                        handle.profile.root_path.trim_end_matches(['/', '\\'])
+                                    ))
+                                    .await?;
+                                handle.file_ops.create_dir(&dir).await?;
+                                handle.file_ops.write_file(&path, &json, None).await?;
+                                Ok::<(), AppError>(())
+                            },
+                        )
+                        .await;
+                        if !matches!(mirrored, Ok(Ok(()))) {
+                            tracing::warn!(%path, "failed to mirror coding history into workspace cache");
+                            let fallback = handle.fallback_cache_dir.join("sessions");
+                            if std::fs::create_dir_all(&fallback).is_ok() {
+                                let _ = std::fs::write(
+                                    fallback.join(format!("{history_id}.json")),
+                                    json,
+                                );
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn coding_history_list(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+    ) -> Result<Vec<CodingHistorySummary>, AppError> {
+        history_list_with_import(&state, workspace_id).await
+    }
+
+    #[tauri::command]
+    pub async fn coding_history_get(
+        state: State<'_, WorkspaceAppState>,
+        id: Uuid,
+    ) -> Result<Option<CodingHistoryDetail>, AppError> {
+        if let Some(existing) = state.coding_history.get(id)? {
+            refresh_history_from_workspace(&state, existing.workspace_id, id).await;
+        }
+        state.coding_history.get(id)
+    }
+
+    /// Opens a history entry and genuinely continues the conversation (not
+    /// a read-only replay) -- feeds the persisted `messages`/`changes` back
+    /// into a freshly constructed `CodingSession`/`ChangeStore`, replacing
+    /// this workspace's current active session; `session.id` reuses the
+    /// history entry's own id so later `saveCurrentHistory` updates keep
+    /// writing the same row instead of forking a new history entry.
+    #[tauri::command]
+    pub async fn coding_history_resume(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        history_id: Uuid,
+    ) -> Result<CodingSessionInfo, AppError> {
+        require_ssh(&state)?;
+        refresh_history_from_workspace(&state, workspace_id, history_id).await;
+        let detail = state
+            .coding_history
+            .get(history_id)?
+            .ok_or_else(|| AppError::NotFound(format!("history not found: {history_id}")))?;
+        if detail.workspace_id != workspace_id {
+            return Err(AppError::Internal("这条历史记录不属于当前工作区".into()));
+        }
+        if state
+            .ai_provider_manager
+            .get(detail.summary.provider_id)?
+            .is_none()
+        {
+            return Err(AppError::NotFound(
+                "这条历史记录关联的 AI 供应商已被删除，请先在模型管理里重新配置后再试".into(),
+            ));
+        }
+
+        let (mut session, change_store) = build_new_session(
+            &state,
+            workspace_id,
+            detail.summary.provider_id,
+            false,
+            Some(history_id),
+        )
+        .await?;
+        session.mode = if detail.summary.mode == "build" {
+            CodingMode::Build
+        } else {
+            CodingMode::Plan
+        };
+        let messages: Vec<serde_json::Value> =
+            serde_json::from_value(detail.messages.clone()).unwrap_or_default();
+        session.restore_messages(messages);
+        let changes: Vec<FileChange> =
+            serde_json::from_value(detail.changes.clone()).unwrap_or_default();
+        change_store.lock().await.restore(changes);
+
+        let info = session_info(&session).await;
+        state
+            .coding_sessions
+            .write()
+            .await
+            .insert(workspace_id, Arc::new(Mutex::new(session)));
+        state
+            .coding_changes
+            .write()
+            .await
+            .insert(workspace_id, change_store);
+        Ok(info)
+    }
+
+    #[tauri::command]
+    pub async fn coding_history_rename(
+        state: State<'_, WorkspaceAppState>,
+        id: Uuid,
+        title: String,
+    ) -> Result<(), AppError> {
+        state.coding_history.rename(id, title.trim())
+    }
+
+    #[tauri::command]
+    pub async fn coding_history_delete(
+        state: State<'_, WorkspaceAppState>,
+        id: Uuid,
+    ) -> Result<(), AppError> {
+        state.coding_history.delete(id)
     }
 }

@@ -7,10 +7,12 @@
 
 pub mod audit;
 pub mod changes;
+pub mod commands;
 pub mod diff;
 pub mod evidence;
 pub mod git_ops;
 pub mod guard;
+pub mod history;
 pub mod local_exec;
 pub mod mcp;
 pub mod permission;
@@ -20,4 +22,6 @@ pub mod target;
 pub mod tools;
 pub mod webfetch;
 
+pub use changes::{ChangeStatus, ChangeStore, FileChange, FileSyncInfo};
+pub use session::{CodingMode, CodingSession, PendingInjection};
 pub use target::CodingTarget;
