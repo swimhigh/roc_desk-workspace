@@ -5,8 +5,10 @@
 //! local_exec -> diff/guard/permission -> git_ops -> ... -> session, the
 //! last of which doesn't exist here yet).
 
+pub mod audit;
 pub mod changes;
 pub mod diff;
+pub mod evidence;
 pub mod git_ops;
 pub mod guard;
 pub mod local_exec;
