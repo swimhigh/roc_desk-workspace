@@ -28,3 +28,6 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 similar = "2"
 reqwest = { version = "0.12", features = ["stream"] }
 futures-util = "0.3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
