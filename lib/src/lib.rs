@@ -454,6 +454,331 @@ pub mod cmd {
     }
 
     // -----------------------------------------------------------------------
+    // Workspace-scoped filesystem (`fs_*`) -- the counterpart to
+    // `roc_desk_explorer::cmd::local_*` for a workspace opened via
+    // `workspace_open_local`/`workspace_open_remote`: every command here
+    // goes through `WorkspaceHandle.file_ops` (already Local/Remote/Agent
+    // dispatching, same trait object `ChangeStore` uses) instead of a
+    // hard-coded `LocalFileOps`, and is boundary-checked for local
+    // workspaces via `guard_local_path` (mirrors the host's old
+    // `commands/fs.rs`; remote boundary-checking is deferred to the
+    // `FileOps` impl itself, same note as the host's version). This is what
+    // lets `EditorPane`/`ExplorerTree` work against a workspace id instead
+    // of a bare local root path -- the one thing standalone was missing for
+    // genuine remote-workspace editing (AI-agent edits already went through
+    // `ChangeStore`/`FileOps` and didn't need this).
+    use base64::Engine;
+    use roc_desk_common::binary_info::{self, BinaryInfo};
+    use roc_desk_common::fsops::{BINARY_PREVIEW_MAX_BYTES, EXECUTABLE_INSPECT_MAX_BYTES};
+    use roc_desk_common::jar_info::{self, JarInfo};
+    use roc_desk_common::{encoding, office_convert};
+    use roc_desk_core::workspace::WorkspaceKind;
+
+    async fn get_fs_handle(
+        state: &State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceHandle, AppError> {
+        state
+            .open_workspaces
+            .read()
+            .await
+            .get(&workspace_id)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound(format!("工作区未打开: {workspace_id}")))
+    }
+
+    fn guard_local_path(handle: &WorkspaceHandle, path: &str) -> Result<(), AppError> {
+        if handle.profile.kind != WorkspaceKind::Local {
+            return Ok(());
+        }
+        let root = std::path::Path::new(&handle.profile.root_path);
+        let root_canon = root.canonicalize().map_err(AppError::from)?;
+
+        let candidate = std::path::PathBuf::from(path);
+        let candidate_canon = match candidate.canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                let parent = candidate
+                    .parent()
+                    .ok_or_else(|| AppError::PermissionDenied(format!("非法路径: {path}")))?;
+                let parent_canon = parent.canonicalize().map_err(|_| {
+                    AppError::PermissionDenied(format!("路径 {path} 不在工作区范围内"))
+                })?;
+                parent_canon.join(candidate.file_name().unwrap_or_default())
+            }
+        };
+
+        if !candidate_canon.starts_with(&root_canon) {
+            return Err(AppError::PermissionDenied(format!(
+                "路径 {path} 不在工作区 {} 范围内",
+                handle.profile.root_path
+            )));
+        }
+        Ok(())
+    }
+
+    fn emit_fs_changed(app_handle: &AppHandle, workspace_id: Uuid) {
+        let _ = app_handle.emit(
+            "fs:changed",
+            serde_json::json!({ "workspaceId": workspace_id }),
+        );
+    }
+
+    #[tauri::command]
+    pub async fn fs_list_dir(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        path: String,
+    ) -> Result<Vec<roc_desk_common::fsops::FileEntry>, AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+        handle.file_ops.list_dir(&path).await
+    }
+
+    #[tauri::command]
+    pub async fn fs_read_file(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        path: String,
+    ) -> Result<roc_desk_common::fsops::FileContent, AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+        handle.file_ops.read_file_for_editor(&path).await
+    }
+
+    #[tauri::command]
+    pub async fn fs_write_file(
+        state: State<'_, WorkspaceAppState>,
+        app_handle: AppHandle,
+        workspace_id: Uuid,
+        path: String,
+        content: String,
+        expected_mtime: Option<i64>,
+    ) -> Result<roc_desk_common::fsops::WriteOutcome, AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+        let outcome = handle
+            .file_ops
+            .write_file(&path, &content, expected_mtime)
+            .await?;
+        if matches!(outcome, roc_desk_common::fsops::WriteOutcome::Written { .. }) {
+            emit_fs_changed(&app_handle, workspace_id);
+        }
+        Ok(outcome)
+    }
+
+    #[tauri::command]
+    pub async fn fs_read_file_with_encoding(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        path: String,
+        encoding_label: String,
+    ) -> Result<roc_desk_common::fsops::FileContent, AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+        let (bytes, mtime, total_size, truncated) = handle.file_ops.read_bytes_for_editor(&path).await?;
+        let text = encoding::decode_with(&bytes, &encoding_label).map_err(AppError::Internal)?;
+        Ok(roc_desk_common::fsops::FileContent { text, encoding: encoding_label, mtime, total_size, truncated })
+    }
+
+    #[tauri::command]
+    pub async fn fs_write_file_with_encoding(
+        state: State<'_, WorkspaceAppState>,
+        app_handle: AppHandle,
+        workspace_id: Uuid,
+        path: String,
+        content: String,
+        encoding_label: String,
+        expected_mtime: Option<i64>,
+    ) -> Result<roc_desk_common::fsops::WriteOutcome, AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+        let bytes = encoding::encode_with(&content, &encoding_label).map_err(AppError::Internal)?;
+        let outcome = handle
+            .file_ops
+            .write_file_bytes(&path, &bytes, expected_mtime)
+            .await?;
+        if matches!(outcome, roc_desk_common::fsops::WriteOutcome::Written { .. }) {
+            emit_fs_changed(&app_handle, workspace_id);
+        }
+        Ok(outcome)
+    }
+
+    #[tauri::command]
+    pub fn fs_supported_encodings() -> Vec<&'static str> {
+        encoding::SUPPORTED_ENCODINGS.to_vec()
+    }
+
+    #[tauri::command]
+    pub async fn fs_read_binary_preview(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        path: String,
+    ) -> Result<String, AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+        let bytes = handle.file_ops.read_binary_for_preview(&path, BINARY_PREVIEW_MAX_BYTES).await?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    /// "用系统默认程序打开"：本地工作区直接开原路径；远程工作区先下载到本地临时
+    /// 目录再开（系统程序不认识 SSH/Agent 路径）。复用 `roc_desk-explorer` 的
+    /// `open_path_or_launch_exe`（可执行文件单独 spawn 并设置工作目录，其余交给
+    /// Tauri opener 插件）而不是自己再写一份。
+    #[tauri::command]
+    pub async fn fs_open_externally(
+        app_handle: AppHandle,
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        path: String,
+    ) -> Result<(), AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+
+        let target = if handle.profile.kind == WorkspaceKind::Local {
+            path.clone()
+        } else {
+            let file_name = path.rsplit('/').next().unwrap_or(&path);
+            let tmp_dir = std::env::temp_dir().join("roc_desk_open");
+            std::fs::create_dir_all(&tmp_dir)?;
+            let local_path = tmp_dir.join(file_name);
+            handle
+                .file_ops
+                .download_to_local_file(&path, &local_path.to_string_lossy())
+                .await?;
+            local_path.to_string_lossy().to_string()
+        };
+
+        crate::roc_desk_explorer::cmd::open_path_or_launch_exe(&app_handle, &target)
+    }
+
+    #[tauri::command]
+    pub async fn fs_convert_legacy_office_to_pdf(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        path: String,
+    ) -> Result<String, AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+
+        let tmp_dir = std::env::temp_dir().join("roc_desk_office_convert");
+        let source_path = if handle.profile.kind == WorkspaceKind::Local {
+            std::path::PathBuf::from(&path)
+        } else {
+            std::fs::create_dir_all(&tmp_dir)?;
+            let file_name = path.rsplit('/').next().unwrap_or(&path);
+            let local_path = tmp_dir.join(file_name);
+            handle
+                .file_ops
+                .download_to_local_file(&path, &local_path.to_string_lossy())
+                .await?;
+            local_path
+        };
+
+        let pdf_path = office_convert::convert_to_pdf(&source_path, &tmp_dir).await?;
+        let bytes = tokio::fs::read(&pdf_path).await.map_err(AppError::from)?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    #[tauri::command]
+    pub async fn fs_inspect_binary(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        path: String,
+    ) -> Result<BinaryInfo, AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+        let bytes = handle.file_ops.read_binary_for_preview(&path, EXECUTABLE_INSPECT_MAX_BYTES).await?;
+        binary_info::inspect(&bytes)
+    }
+
+    #[tauri::command]
+    pub async fn fs_peek_is_binary(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        path: String,
+    ) -> Result<bool, AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+        let (head, _mtime) = handle.file_ops.read_file_raw_bounded(&path, 64).await?;
+        Ok(binary_info::looks_like_binary(&head))
+    }
+
+    #[tauri::command]
+    pub async fn fs_inspect_jar(
+        state: State<'_, WorkspaceAppState>,
+        workspace_id: Uuid,
+        path: String,
+    ) -> Result<JarInfo, AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+        let bytes = handle.file_ops.read_binary_for_preview(&path, EXECUTABLE_INSPECT_MAX_BYTES).await?;
+        jar_info::inspect(&bytes)
+    }
+
+    #[tauri::command]
+    pub async fn fs_delete(
+        state: State<'_, WorkspaceAppState>,
+        app_handle: AppHandle,
+        workspace_id: Uuid,
+        path: String,
+        is_dir: bool,
+    ) -> Result<(), AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+        handle.file_ops.delete(&path, is_dir).await?;
+        emit_fs_changed(&app_handle, workspace_id);
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn fs_rename(
+        state: State<'_, WorkspaceAppState>,
+        app_handle: AppHandle,
+        workspace_id: Uuid,
+        from: String,
+        to: String,
+    ) -> Result<(), AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &from)?;
+        guard_local_path(&handle, &to)?;
+        handle.file_ops.rename(&from, &to).await?;
+        emit_fs_changed(&app_handle, workspace_id);
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn fs_copy(
+        state: State<'_, WorkspaceAppState>,
+        app_handle: AppHandle,
+        workspace_id: Uuid,
+        from: String,
+        to: String,
+        is_dir: bool,
+    ) -> Result<(), AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &from)?;
+        guard_local_path(&handle, &to)?;
+        handle.file_ops.copy(&from, &to, is_dir).await?;
+        emit_fs_changed(&app_handle, workspace_id);
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn fs_create_dir(
+        state: State<'_, WorkspaceAppState>,
+        app_handle: AppHandle,
+        workspace_id: Uuid,
+        path: String,
+    ) -> Result<(), AppError> {
+        let handle = get_fs_handle(&state, workspace_id).await?;
+        guard_local_path(&handle, &path)?;
+        handle.file_ops.create_dir(&path).await?;
+        emit_fs_changed(&app_handle, workspace_id);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Local terminal
     // -----------------------------------------------------------------------
 

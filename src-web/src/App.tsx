@@ -1,8 +1,16 @@
 import React, { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderOpen, X, TerminalSquare, GitBranch, Bot } from "lucide-react";
+import { FolderOpen, X, TerminalSquare, GitBranch, Bot, Server } from "lucide-react";
 import { workspaceService, type WorkspaceProfile } from "./services";
-import { LocalFileTree, EditorPane, useEditorStore } from "@roc_desk/tool-editor";
+import { EditorPane, useEditorStore } from "@roc_desk/tool-editor";
+import { ExplorerTree } from "./components/Workspace/ExplorerTree";
+import { RemoteWorkspaceDialog } from "./components/Workspace/RemoteWorkspaceDialog";
+import {
+  HostKeyPromptHost,
+  AgentCertPromptHost,
+  registerHostKeyPromptListener,
+  registerAgentCertPromptListener,
+} from "@roc_desk/tool-ssh";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { GitPanel } from "./components/GitPanel";
 import { CodingAgentPanel } from "./components/CodingAgent/CodingAgentPanel";
@@ -15,15 +23,22 @@ type BottomTab = "terminal" | "git" | "ai" | null;
 const WelcomeScreen: React.FC<{
   recent: WorkspaceProfile[];
   onOpen: () => void;
+  onOpenRemote: () => void;
   onOpenRecent: (p: WorkspaceProfile) => void;
   onRemoveRecent: (id: string) => void;
-}> = ({ recent, onOpen, onOpenRecent, onRemoveRecent }) => (
+}> = ({ recent, onOpen, onOpenRemote, onOpenRecent, onRemoveRecent }) => (
   <div className="welcome">
     <h2 style={{ fontWeight: 500 }}>编程工作区</h2>
-    <button className="btn primary" onClick={onOpen}>
-      <FolderOpen style={{ width: 14, height: 14, marginRight: 6, verticalAlign: -2 }} />
-      打开文件夹
-    </button>
+    <div style={{ display: "flex", gap: 8 }}>
+      <button className="btn primary" onClick={onOpen}>
+        <FolderOpen style={{ width: 14, height: 14, marginRight: 6, verticalAlign: -2 }} />
+        打开文件夹
+      </button>
+      <button className="btn ghost" onClick={onOpenRemote}>
+        <Server style={{ width: 14, height: 14, marginRight: 6, verticalAlign: -2 }} />
+        连接远程主机
+      </button>
+    </div>
     {recent.length > 0 && (
       <>
         <div style={{ color: "var(--text-secondary)", fontSize: 12, marginTop: 16 }}>最近打开</div>
@@ -73,6 +88,7 @@ export const App: React.FC = () => {
   const [recent, setRecent] = useState<WorkspaceProfile[]>([]);
   const [bottomTab, setBottomTab] = useState<BottomTab>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showRemoteDialog, setShowRemoteDialog] = useState(false);
 
   const refreshRecent = () => {
     workspaceService
@@ -89,6 +105,19 @@ export const App: React.FC = () => {
     return () => unlisten?.();
   }, []);
 
+  // 第一次连上一台新的 SSH/Agent 主机会触发指纹 TOFU 确认，不监听这两个事件会
+  // 让 ConnectionForm/sftpService/agentService 的连接请求永远挂起。
+  useEffect(() => {
+    let stopHostKey: (() => void) | undefined;
+    let stopAgentCert: (() => void) | undefined;
+    registerHostKeyPromptListener().then((fn) => { stopHostKey = fn; });
+    registerAgentCertPromptListener().then((fn) => { stopAgentCert = fn; });
+    return () => {
+      stopHostKey?.();
+      stopAgentCert?.();
+    };
+  }, []);
+
   const openFolder = async () => {
     const selected = await open({ directory: true, multiple: false });
     if (!selected || Array.isArray(selected)) return;
@@ -103,7 +132,10 @@ export const App: React.FC = () => {
 
   const openRecent = async (profile: WorkspaceProfile) => {
     try {
-      const opened = await workspaceService.openLocal(profile.root_path);
+      const opened =
+        profile.kind === "remote" && profile.connection_id
+          ? await workspaceService.openRemote(profile.connection_id, profile.root_path)
+          : await workspaceService.openLocal(profile.root_path);
       setWorkspace(opened);
       refreshRecent();
     } catch (e) {
@@ -121,6 +153,7 @@ export const App: React.FC = () => {
   };
 
   const closeWorkspace = () => {
+    if (workspace) void workspaceService.close(workspace.id);
     setWorkspace(null);
     useEditorStore.getState().closeAll();
   };
@@ -134,11 +167,30 @@ export const App: React.FC = () => {
           <ThemeToggle />
         </div>
         {error && <div className="error-banner">{error}</div>}
-        <WelcomeScreen recent={recent} onOpen={() => void openFolder()} onOpenRecent={(p) => void openRecent(p)} onRemoveRecent={(id) => void removeRecent(id)} />
+        <WelcomeScreen
+          recent={recent}
+          onOpen={() => void openFolder()}
+          onOpenRemote={() => setShowRemoteDialog(true)}
+          onOpenRecent={(p) => void openRecent(p)}
+          onRemoveRecent={(id) => void removeRecent(id)}
+        />
         <ToastStack />
+        <HostKeyPromptHost />
+        <AgentCertPromptHost />
+        {showRemoteDialog && (
+          <RemoteWorkspaceDialog
+            onClose={() => setShowRemoteDialog(false)}
+            onOpened={(profile) => {
+              setWorkspace(profile);
+              refreshRecent();
+            }}
+          />
+        )}
       </div>
     );
   }
+
+  const isRemote = workspace.kind === "remote";
 
   return (
     <div className="app-shell">
@@ -153,37 +205,41 @@ export const App: React.FC = () => {
       {error && <div className="error-banner">{error}</div>}
       <div className="body-row">
         <div className="sidebar">
-          <LocalFileTree
-            root={workspace.root_path}
-            onRootChange={() => {
-              /* 工作区场景的根目录由"打开文件夹"/"最近打开"决定，不通过文件树
-               * 自己的"钉常用目录"按钮改变——固定传入 workspace.root_path 即可。*/
-            }}
-            onOpenFile={(path) => void useEditorStore.getState().openStandaloneFile(path)}
+          <ExplorerTree
+            workspaceId={workspace.id}
+            rootPath={workspace.root_path}
+            onOpenFile={(path, opts) => void useEditorStore.getState().openPreview(workspace.id, path).then(() => {
+              if (opts?.pin) useEditorStore.getState().pin(path);
+            })}
+            onCompare={(l, r) => void useEditorStore.getState().openDiff(workspace.id, l, r)}
           />
         </div>
         <div className="main-col">
           <div className="main-content">
-            <EditorPane workspaceId={null} rootPath={workspace.root_path} />
+            <EditorPane workspaceId={workspace.id} rootPath={workspace.root_path} />
           </div>
           <div className="bottom-panel" style={{ height: bottomTab === "ai" ? 520 : bottomTab ? 280 : "auto" }}>
             <div className="bottom-panel-header">
-              <div
-                className="tab"
-                style={{ borderRight: "none", color: bottomTab === "terminal" ? "var(--text-primary)" : "var(--text-secondary)" }}
-                onClick={() => setBottomTab(bottomTab === "terminal" ? null : "terminal")}
-              >
-                <TerminalSquare style={{ width: 13, height: 13, marginRight: 4, verticalAlign: -2 }} />
-                终端
-              </div>
-              <div
-                className="tab"
-                style={{ borderRight: "none", color: bottomTab === "git" ? "var(--text-primary)" : "var(--text-secondary)" }}
-                onClick={() => setBottomTab(bottomTab === "git" ? null : "git")}
-              >
-                <GitBranch style={{ width: 13, height: 13, marginRight: 4, verticalAlign: -2 }} />
-                Git
-              </div>
+              {!isRemote && (
+                <div
+                  className="tab"
+                  style={{ borderRight: "none", color: bottomTab === "terminal" ? "var(--text-primary)" : "var(--text-secondary)" }}
+                  onClick={() => setBottomTab(bottomTab === "terminal" ? null : "terminal")}
+                >
+                  <TerminalSquare style={{ width: 13, height: 13, marginRight: 4, verticalAlign: -2 }} />
+                  终端
+                </div>
+              )}
+              {!isRemote && (
+                <div
+                  className="tab"
+                  style={{ borderRight: "none", color: bottomTab === "git" ? "var(--text-primary)" : "var(--text-secondary)" }}
+                  onClick={() => setBottomTab(bottomTab === "git" ? null : "git")}
+                >
+                  <GitBranch style={{ width: 13, height: 13, marginRight: 4, verticalAlign: -2 }} />
+                  Git
+                </div>
+              )}
               <div
                 className="tab"
                 style={{ borderRight: "none", color: bottomTab === "ai" ? "var(--text-primary)" : "var(--text-secondary)" }}
@@ -201,7 +257,7 @@ export const App: React.FC = () => {
                   <CodingAgentPanel
                     workspaceId={workspace.id}
                     active={bottomTab === "ai"}
-                    onOpenFile={(path) => void useEditorStore.getState().openStandaloneFile(path)}
+                    onOpenFile={(path) => void useEditorStore.getState().openPreview(workspace.id, path)}
                   />
                 )}
               </div>

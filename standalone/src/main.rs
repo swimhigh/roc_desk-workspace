@@ -2,6 +2,7 @@
 
 use roc_desk_workspace::roc_desk_editor::symbols::SymbolIndexState;
 use roc_desk_workspace::WorkspaceAppState;
+use tauri::Manager;
 
 fn main() {
     // Portable, exe-relative `.rock_desk` dir (see
@@ -13,21 +14,37 @@ fn main() {
     let data_dir = roc_desk_core::paths::portable_data_dir().expect("failed to resolve app data dir");
     let db_path = data_dir.join("workspace.db");
     let cache_root = data_dir.join("workspace-cache");
-    let state = WorkspaceAppState::new(&db_path, cache_root).expect("failed to init workspace state");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(state)
         .manage(SymbolIndexState::default())
+        .setup(move |app| {
+            // Standalone now owns its own SSH/Agent connection pools (a
+            // fresh `ssh.db`, independent of `workspace.db`) and feeds them
+            // into `WorkspaceAppState::with_ssh` -- this is what makes both
+            // `workspace_open_remote` (and, incidentally, local workspaces
+            // too: `CodingSession` always needs *some* pools passed to it,
+            // see `WorkspaceAppState::ssh`'s doc comment) actually work,
+            // instead of permanently returning "功能未启用" like before.
+            let ssh_db_path = data_dir.join("ssh.db");
+            let ssh_state = roc_desk_ssh::RocDeskSshAppState::new(&ssh_db_path, app.handle().clone())
+                .expect("failed to init ssh state");
+            let workspace_state = WorkspaceAppState::new(&db_path, cache_root.clone())
+                .expect("failed to init workspace state")
+                .with_ssh(
+                    ssh_state.connection_manager.clone(),
+                    ssh_state.ssh_pool.clone(),
+                    ssh_state.agent_pool.clone(),
+                );
+            app.manage(workspace_state);
+            app.manage(ssh_state);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // This tool's own commands.
             roc_desk_workspace::cmd::workspace_list_recent,
             roc_desk_workspace::cmd::workspace_open_local,
-            // Standalone has no SSH connection-management UI/commands of its
-            // own, so `WorkspaceAppState::with_ssh` is never called here --
-            // this always returns the "not enabled" error, registered anyway
-            // for forward compatibility (host wiring calls `with_ssh`).
             roc_desk_workspace::cmd::workspace_open_remote,
             roc_desk_workspace::cmd::workspace_close,
             roc_desk_workspace::cmd::workspace_remove_recent,
@@ -50,11 +67,7 @@ fn main() {
             roc_desk_workspace::cmd::ai_provider_update,
             roc_desk_workspace::cmd::ai_provider_delete,
             roc_desk_workspace::cmd::ai_provider_list_models,
-            // AI coding agent. Standalone never calls `WorkspaceAppState::with_ssh`
-            // (no SSH connection-management UI of its own), so every one of
-            // these returns the "not enabled" error at runtime -- registered
-            // anyway for forward compatibility, same policy as
-            // `workspace_open_remote` above.
+            // AI coding agent.
             roc_desk_workspace::cmd::coding_set_provider,
             roc_desk_workspace::cmd::coding_start,
             roc_desk_workspace::cmd::coding_new_session,
@@ -91,6 +104,44 @@ fn main() {
             roc_desk_workspace::cmd::coding_history_resume,
             roc_desk_workspace::cmd::coding_history_rename,
             roc_desk_workspace::cmd::coding_history_delete,
+            // Workspace-scoped filesystem (local + remote) for `ExplorerTree`/
+            // `EditorPane` -- the piece that was missing for genuine remote
+            // workspace editing (AI-agent edits already went through
+            // `ChangeStore`/`FileOps` and didn't need this).
+            roc_desk_workspace::cmd::fs_list_dir,
+            roc_desk_workspace::cmd::fs_read_file,
+            roc_desk_workspace::cmd::fs_write_file,
+            roc_desk_workspace::cmd::fs_read_file_with_encoding,
+            roc_desk_workspace::cmd::fs_write_file_with_encoding,
+            roc_desk_workspace::cmd::fs_supported_encodings,
+            roc_desk_workspace::cmd::fs_read_binary_preview,
+            roc_desk_workspace::cmd::fs_open_externally,
+            roc_desk_workspace::cmd::fs_convert_legacy_office_to_pdf,
+            roc_desk_workspace::cmd::fs_inspect_binary,
+            roc_desk_workspace::cmd::fs_peek_is_binary,
+            roc_desk_workspace::cmd::fs_inspect_jar,
+            roc_desk_workspace::cmd::fs_delete,
+            roc_desk_workspace::cmd::fs_rename,
+            roc_desk_workspace::cmd::fs_copy,
+            roc_desk_workspace::cmd::fs_create_dir,
+            // SSH/Agent connection management + remote directory browsing --
+            // only the subset "连接远程主机并选择目录" actually needs (no
+            // terminal/RDP/SFTP dual-pane browser/transfer log; the coding
+            // workspace screen doesn't use those even in the full host app).
+            roc_desk_ssh::cmd::connection_list,
+            roc_desk_ssh::cmd::connection_create,
+            roc_desk_ssh::cmd::connection_update,
+            roc_desk_ssh::cmd::connection_delete,
+            roc_desk_ssh::cmd::connection_group_list,
+            roc_desk_ssh::cmd::connection_group_create,
+            roc_desk_ssh::cmd::connection_group_update,
+            roc_desk_ssh::cmd::connection_group_delete,
+            roc_desk_ssh::cmd::sftp_list_dir,
+            roc_desk_ssh::cmd::agent_test_connection,
+            roc_desk_ssh::cmd::agent_list_dir,
+            roc_desk_ssh::cmd::agent_list_roots,
+            roc_desk_ssh::cmd::ssh_confirm_host_key,
+            roc_desk_ssh::cmd::agent_confirm_cert,
             // Local filesystem surface, reused from roc_desk-explorer.
             roc_desk_workspace::roc_desk_explorer::cmd::local_list_dir,
             roc_desk_workspace::roc_desk_explorer::cmd::local_list_drives,

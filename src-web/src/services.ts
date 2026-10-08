@@ -7,8 +7,9 @@ import { invoke } from "@tauri-apps/api/core";
 
 export interface WorkspaceProfile {
   id: string;
-  kind: "local";
+  kind: "local" | "remote";
   root_path: string;
+  connection_id: string | null;
   display_name: string;
   last_opened_at: string | null;
 }
@@ -44,6 +45,12 @@ export const workspaceService = {
   openLocal(path: string): Promise<WorkspaceProfile> {
     return invoke("workspace_open_local", { path });
   },
+  openRemote(connectionId: string, remotePath: string): Promise<WorkspaceProfile> {
+    return invoke("workspace_open_remote", { connectionId, remotePath });
+  },
+  close(id: string): Promise<void> {
+    return invoke("workspace_close", { id });
+  },
   removeRecent(id: string): Promise<void> {
     return invoke("workspace_remove_recent", { id });
   },
@@ -51,6 +58,13 @@ export const workspaceService = {
     return invoke("workspace_update_path", { id, newPath });
   },
 };
+
+// Workspace-scoped filesystem (local + remote, boundary-checked, backing
+// `fs_*`) is `@roc_desk/tool-editor`'s own `fsService` -- that package's
+// `editorStore.openPreview(workspaceId, path)` already dispatches through
+// it whenever `workspaceId` is non-null, so this tool doesn't need a
+// second copy; `ExplorerTree`/`explorerStore` below import it from there
+// too, instead of duplicating it here.
 
 // -----------------------------------------------------------------------
 // Local filesystem -- roc_desk_explorer::cmd::local_*, re-exported by
