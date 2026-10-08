@@ -1,14 +1,16 @@
 import React, { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderOpen, X, TerminalSquare, GitBranch } from "lucide-react";
+import { FolderOpen, X, TerminalSquare, GitBranch, Bot } from "lucide-react";
 import { workspaceService, type WorkspaceProfile } from "./services";
 import { LocalFileTree, EditorPane, useEditorStore } from "@roc_desk/tool-editor";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { GitPanel } from "./components/GitPanel";
+import { CodingAgentPanel } from "./components/CodingAgent/CodingAgentPanel";
+import { registerCodingListeners } from "./stores/codingStore";
 import { ThemeToggle } from "./components/shared/ThemeToggle";
 import { ToastStack } from "./components/shared/Toast";
 
-type BottomTab = "terminal" | "git" | null;
+type BottomTab = "terminal" | "git" | "ai" | null;
 
 const WelcomeScreen: React.FC<{
   recent: WorkspaceProfile[];
@@ -80,6 +82,12 @@ export const App: React.FC = () => {
   };
 
   useEffect(refreshRecent, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    registerCodingListeners().then((fn) => { unlisten = fn; });
+    return () => unlisten?.();
+  }, []);
 
   const openFolder = async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -158,7 +166,7 @@ export const App: React.FC = () => {
           <div className="main-content">
             <EditorPane workspaceId={null} rootPath={workspace.root_path} />
           </div>
-          <div className="bottom-panel" style={{ height: bottomTab ? 280 : "auto" }}>
+          <div className="bottom-panel" style={{ height: bottomTab === "ai" ? 520 : bottomTab ? 280 : "auto" }}>
             <div className="bottom-panel-header">
               <div
                 className="tab"
@@ -176,11 +184,26 @@ export const App: React.FC = () => {
                 <GitBranch style={{ width: 13, height: 13, marginRight: 4, verticalAlign: -2 }} />
                 Git
               </div>
+              <div
+                className="tab"
+                style={{ borderRight: "none", color: bottomTab === "ai" ? "var(--text-primary)" : "var(--text-secondary)" }}
+                onClick={() => setBottomTab(bottomTab === "ai" ? null : "ai")}
+              >
+                <Bot style={{ width: 13, height: 13, marginRight: 4, verticalAlign: -2 }} />
+                AI 编程助手
+              </div>
             </div>
             {bottomTab && (
-              <div className="bottom-panel-body">
+              <div className="bottom-panel-body" style={{ display: "flex", flexDirection: "column" }}>
                 {bottomTab === "terminal" && <TerminalPanel cwd={workspace.root_path} key={workspace.id} />}
                 {bottomTab === "git" && <GitPanel cwd={workspace.root_path} key={workspace.id} />}
+                {bottomTab === "ai" && (
+                  <CodingAgentPanel
+                    workspaceId={workspace.id}
+                    active={bottomTab === "ai"}
+                    onOpenFile={(path) => void useEditorStore.getState().openStandaloneFile(path)}
+                  />
+                )}
               </div>
             )}
           </div>

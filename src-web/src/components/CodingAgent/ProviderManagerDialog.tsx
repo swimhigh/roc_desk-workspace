@@ -1,0 +1,237 @@
+import React, { useState } from "react";
+import { Trash2, Pencil } from "lucide-react";
+import { ConfirmDialog } from "../shared/ConfirmDialog";
+import { useAiProviderStore } from "../../stores/aiProviderStore";
+import { useToastStore } from "../shared/Toast";
+import { formatError } from "../../utils/error";
+import type { AiProviderInput } from "../../services";
+
+interface ProviderManagerDialogProps {
+  onClose: (hasDraft: boolean) => void;
+}
+
+const emptyForm: AiProviderInput = {
+  name: "",
+  api_base: "",
+  api_key: "",
+  model: "",
+  is_local: false,
+  wire_api: "chat_completions",
+  reasoning_effort: "",
+  context_window_tokens: null,
+};
+
+const REASONING_EFFORT_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "不设置（交给服务端默认值）" },
+  { value: "minimal", label: "minimal" },
+  { value: "low", label: "low" },
+  { value: "medium", label: "medium" },
+  { value: "high", label: "high" },
+];
+interface ProviderDraft {
+  form: AiProviderInput;
+  editingId: string | null;
+}
+
+// In-memory only -- an API key must never be written into localStorage.
+let providerDraft: ProviderDraft | null = null;
+
+function isFormDirty(form: AiProviderInput, editingId: string | null): boolean {
+  return Boolean(editingId || form.name || form.api_base || form.api_key || form.model || form.is_local);
+}
+
+export function hasProviderDraft(): boolean {
+  return providerDraft !== null;
+}
+
+/** AI provider management: OpenAI-compatible endpoints (Doubao/DeepSeek/
+ * Qwen/local Ollama/...) all share the same protocol, only `api_base`/
+ * `model` differ. API Key goes through the system credential store. */
+export const ProviderManagerDialog: React.FC<ProviderManagerDialogProps> = ({ onClose }) => {
+  const { providers, createProvider, updateProvider, deleteProvider } = useAiProviderStore();
+  const restoredDraft = providerDraft;
+  const [form, setForm] = useState<AiProviderInput>(() => restoredDraft?.form ?? emptyForm);
+  const [editingId, setEditingId] = useState<string | null>(() => restoredDraft?.editingId ?? null);
+  const [saving, setSaving] = useState(false);
+  const push = useToastStore((s) => s.push);
+  const canSave = Boolean(form.name.trim() && form.api_base.trim() && form.model.trim());
+
+  const set = <K extends keyof AiProviderInput>(key: K, v: AiProviderInput[K]) =>
+    setForm((current) => {
+      const next = { ...current, [key]: v };
+      providerDraft = isFormDirty(next, editingId) ? { form: next, editingId } : null;
+      return next;
+    });
+
+  const startEdit = (id: string) => {
+    const p = providers.find((x) => x.id === id);
+    if (!p) return;
+    setEditingId(id);
+    const next = {
+      name: p.name,
+      api_base: p.api_base,
+      api_key: "",
+      model: p.model,
+      is_local: p.is_local,
+      wire_api: p.wire_api || "chat_completions",
+      reasoning_effort: p.reasoning_effort ?? "",
+      context_window_tokens: p.context_window_tokens,
+    };
+    setForm(next);
+    providerDraft = { form: next, editingId: id };
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setForm(emptyForm);
+    providerDraft = null;
+  };
+
+  const handleSave = async () => {
+    if (!form.name.trim() || !form.api_base.trim() || !form.model.trim()) return;
+    setSaving(true);
+    try {
+      const payload = { ...form, api_key: form.api_key || null };
+      if (editingId) {
+        await updateProvider(editingId, payload);
+        push("success", "已更新 Provider");
+      } else {
+        await createProvider(payload);
+        push("success", "已添加 Provider");
+      }
+      setEditingId(null);
+      setForm(emptyForm);
+      providerDraft = null;
+    } catch (e) {
+      push("error", `保存失败：${formatError(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const closeAndKeepDraft = () => {
+    const hasDraft = isFormDirty(form, editingId);
+    providerDraft = hasDraft ? { form, editingId } : null;
+    if (hasDraft) push("info", "配置草稿已保留，可从“继续配置”返回");
+    onClose(hasDraft);
+  };
+
+  return (
+    <ConfirmDialog open severity="info" icon="🤖" title="AI Provider 管理" closeOnBackdropClick={false} onDismiss={closeAndKeepDraft} actions={<button className="btn ghost sm" onClick={closeAndKeepDraft}>关闭</button>}>
+      {restoredDraft && (
+        <div className="provider-draft-banner">已恢复上次未完成的配置草稿</div>
+      )}
+      <div style={{ maxHeight: 200, overflowY: "auto", marginBottom: 12 }}>
+        {providers.length === 0 ? (
+          <p style={{ fontSize: 13, color: "var(--text-secondary)" }}>还没有配置 Provider。</p>
+        ) : (
+          providers.map((p) => (
+            <div key={p.id} className="file-row" style={{ gridTemplateColumns: "1fr auto auto" }}>
+              <span>
+                {p.name}
+                <span style={{ color: "var(--text-secondary)", fontSize: 11, marginLeft: 6 }}>
+                  {p.is_local ? "本地" : "云端"} · {p.model}
+                </span>
+              </span>
+              <button className="btn ghost sm" onClick={() => startEdit(p.id)} title="编辑">
+                <Pencil style={{ width: 14, height: 14 }} />
+              </button>
+              <button className="btn ghost sm" onClick={() => deleteProvider(p.id)} title="删除">
+                <Trash2 style={{ width: 14, height: 14 }} />
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="form">
+        {editingId && (
+          <div style={{ fontSize: 12, color: "var(--accent)", marginBottom: 4 }}>正在编辑，取消可回到新建</div>
+        )}
+        <div className="form-row">
+          <label className="form-label">名称</label>
+          <input className="form-input" value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="如：DeepSeek" />
+        </div>
+        <div className="form-row">
+          <label className="form-label">API Base</label>
+          <input
+            className="form-input"
+            value={form.api_base}
+            onChange={(e) => set("api_base", e.target.value)}
+            placeholder="https://api.deepseek.com/v1"
+          />
+        </div>
+        <div className="form-row">
+          <label className="form-label">模型</label>
+          <input className="form-input" value={form.model} onChange={(e) => set("model", e.target.value)} placeholder="deepseek-chat" />
+        </div>
+        <div className="form-row">
+          <label className="form-label">API Key</label>
+          <input
+            className="form-input"
+            type="password"
+            value={form.api_key ?? ""}
+            onChange={(e) => set("api_key", e.target.value)}
+            placeholder={editingId ? "留空则沿用已保存的密钥" : "本地 Ollama 可留空"}
+          />
+        </div>
+        <div className="form-row" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <input type="checkbox" checked={form.is_local} onChange={(e) => set("is_local", e.target.checked)} />
+          <label className="form-label" style={{ margin: 0 }}>
+            本地模型（不受数据出境脱敏策略约束）
+          </label>
+        </div>
+        <div className="form-row" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <input
+            type="checkbox"
+            checked={form.wire_api === "responses"}
+            onChange={(e) => set("wire_api", e.target.checked ? "responses" : "chat_completions")}
+          />
+          <label className="form-label" style={{ margin: 0 }}>
+            使用 Responses API（而不是 Chat Completions，官方 OpenAI/Azure/Bedrock 部分新模型需要）
+          </label>
+        </div>
+        <div className="form-row">
+          <label className="form-label" title="对齐 Codex config.toml 的 model_reasoning_effort，只对 gpt-5/o 系列这类推理模型有意义">
+            推理力度
+          </label>
+          <select
+            className="form-select"
+            value={form.reasoning_effort ?? ""}
+            onChange={(e) => set("reasoning_effort", e.target.value)}
+          >
+            {REASONING_EFFORT_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="form-row">
+          <label className="form-label" title="AI 编程助手自动裁剪/摘要历史对话时用这个值判断预算；留空则用保守的全局默认值（60,000），大窗口 Provider 建议填实际支持的上下文窗口，避免被过度频繁地压缩上下文">
+            上下文窗口（估算 token 数，可选）
+          </label>
+          <input
+            className="form-input"
+            type="number"
+            min={1000}
+            step={1000}
+            value={form.context_window_tokens ?? ""}
+            onChange={(e) => set("context_window_tokens", e.target.value.trim() === "" ? null : Number(e.target.value))}
+            placeholder="留空则用默认值 60,000，比如 128000/200000"
+          />
+        </div>
+        <div className="form-actions">
+          {isFormDirty(form, editingId) && (
+            <button className="btn ghost sm" onClick={cancelEdit} disabled={saving}>
+              放弃草稿
+            </button>
+          )}
+          <button className="btn primary sm" onClick={handleSave} disabled={saving || !canSave}>
+            {saving ? "保存中…" : editingId ? "保存修改" : "+ 添加"}
+          </button>
+        </div>
+      </div>
+    </ConfirmDialog>
+  );
+};
