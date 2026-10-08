@@ -12,6 +12,7 @@ pub mod evidence;
 pub mod git_ops;
 pub mod guard;
 pub mod local_exec;
+pub mod mcp;
 pub mod permission;
 pub mod skills;
 pub mod target;
