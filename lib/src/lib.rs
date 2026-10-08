@@ -55,6 +55,7 @@ pub fn tool_info() -> (&'static str, &'static str) {
     (TOOL_NAME, TOOL_DESCRIPTION)
 }
 
+pub mod coding;
 pub mod git;
 pub mod pty;
 
