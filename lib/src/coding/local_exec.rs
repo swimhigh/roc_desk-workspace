@@ -65,7 +65,7 @@ fn is_explicit_cmd_invocation(command: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_command_for(command: &str, default_to_powershell: bool) -> tokio::process::Command {
+pub(crate) fn windows_command_for(command: &str, default_to_powershell: bool) -> tokio::process::Command {
     // `raw_arg` (not `arg`): if `command` is already a complete command line
     // the caller hand-assembled/escaped for the target shell, `.arg()` would
     // treat it as one opaque value and escape it *again* -- the quotes it
@@ -109,7 +109,7 @@ fn windows_command_for(command: &str, default_to_powershell: bool) -> tokio::pro
 }
 
 #[cfg(not(target_os = "windows"))]
-fn unix_command_for(command: &str) -> tokio::process::Command {
+pub(crate) fn unix_command_for(command: &str) -> tokio::process::Command {
     let mut c = tokio::process::Command::new("sh");
     c.arg("-c").arg(command);
     c

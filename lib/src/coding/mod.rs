@@ -14,6 +14,7 @@ pub mod guard;
 pub mod local_exec;
 pub mod mcp;
 pub mod permission;
+pub mod session;
 pub mod skills;
 pub mod target;
 pub mod tools;
