@@ -13,5 +13,6 @@ pub mod local_exec;
 pub mod permission;
 pub mod target;
 pub mod tools;
+pub mod webfetch;
 
 pub use target::CodingTarget;
