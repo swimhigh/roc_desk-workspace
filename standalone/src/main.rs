@@ -44,6 +44,12 @@ fn main() {
             roc_desk_workspace::cmd::git_current_branch,
             roc_desk_workspace::cmd::git_commit_file,
             roc_desk_workspace::cmd::git_commit_paths,
+            // AI provider management (shared backing for the coding agent).
+            roc_desk_workspace::cmd::ai_provider_list,
+            roc_desk_workspace::cmd::ai_provider_create,
+            roc_desk_workspace::cmd::ai_provider_update,
+            roc_desk_workspace::cmd::ai_provider_delete,
+            roc_desk_workspace::cmd::ai_provider_list_models,
             // AI coding agent. Standalone never calls `WorkspaceAppState::with_ssh`
             // (no SSH connection-management UI of its own), so every one of
             // these returns the "not enabled" error at runtime -- registered

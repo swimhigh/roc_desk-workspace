@@ -301,6 +301,7 @@ pub mod cmd {
     use crate::coding::skills::SkillMeta;
     use crate::coding::target::CodingTarget;
     use roc_desk_common::ai::attachments::ChatAttachment;
+    use roc_desk_common::ai::{AiProvider, AiProviderInput};
     use roc_desk_common::fsops::FileOps;
 
     use crate::{WorkspaceAppState, WorkspaceHandle};
@@ -540,6 +541,54 @@ pub mod cmd {
         message: String,
     ) -> Result<String, AppError> {
         crate::git::commit_paths(&cwd, &paths, &message).await
+    }
+
+    // -----------------------------------------------------------------------
+    // AI provider management -- not part of the host's `commands/coding.rs`
+    // (it lives in the host's separate `commands/ai.rs`, shared by the
+    // coding agent and the general-purpose AI chat panel), but the coding
+    // agent has no usable session without at least one configured provider,
+    // so this tool needs its own copy of the same thin CRUD wrappers.
+    // -----------------------------------------------------------------------
+
+    #[tauri::command]
+    pub async fn ai_provider_list(
+        state: State<'_, WorkspaceAppState>,
+    ) -> Result<Vec<AiProvider>, AppError> {
+        state.ai_provider_manager.list()
+    }
+
+    #[tauri::command]
+    pub async fn ai_provider_create(
+        state: State<'_, WorkspaceAppState>,
+        input: AiProviderInput,
+    ) -> Result<AiProvider, AppError> {
+        state.ai_provider_manager.create(input).await
+    }
+
+    #[tauri::command]
+    pub async fn ai_provider_update(
+        state: State<'_, WorkspaceAppState>,
+        id: Uuid,
+        input: AiProviderInput,
+    ) -> Result<AiProvider, AppError> {
+        state.ai_provider_manager.update(id, input).await
+    }
+
+    #[tauri::command]
+    pub async fn ai_provider_delete(
+        state: State<'_, WorkspaceAppState>,
+        id: Uuid,
+    ) -> Result<(), AppError> {
+        state.ai_provider_manager.delete(id).await
+    }
+
+    #[tauri::command]
+    pub async fn ai_provider_list_models(
+        state: State<'_, WorkspaceAppState>,
+        id: Uuid,
+    ) -> Result<Vec<String>, AppError> {
+        state.ai_provider_manager.list_models(id).await
     }
 
     // -----------------------------------------------------------------------
