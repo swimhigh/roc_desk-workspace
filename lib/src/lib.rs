@@ -164,24 +164,39 @@ pub struct WorkspaceAppState {
 }
 
 impl WorkspaceAppState {
-    /// `db_path` is this tool's own SQLite file for every AI-coding-agent
-    /// table (AI providers/coding history/MCP servers/permission rules/
-    /// audit log/evidence cache); `workspace_db_path` is a **separate** file
-    /// for just the "recent workspaces" list -- split out so a caller can
-    /// point it at the same `workspaces.db` the full `roc_desk.exe` host's
-    /// own `WorkspaceManager` reads/writes (host keeps that file free of
-    /// this crate's AI-agent tables on purpose, see host
-    /// `src-tauri/src/lib.rs`'s comment by its own `WorkspaceAppState::new`
-    /// call). Passing the same path for both is fine too (that's what every
-    /// caller did before this split) -- `WorkspaceRepo::ensure_schema` and
-    /// every other `ensure_schema` here use `CREATE TABLE IF NOT EXISTS`,
-    /// so sharing one file across both never collides.
+    /// `db_path` is this tool's own SQLite file for the AI-coding-agent
+    /// tables that are genuinely this crate's own (coding history/MCP
+    /// servers/permission rules/audit log/evidence cache -- schemas ported
+    /// from, but not literally shared code with, the host's own original
+    /// implementations of these, so pointing this at the host's `roc_desk.db`
+    /// would risk silent schema drift between two independently-maintained
+    /// copies).
+    ///
+    /// `ai_providers_db_path` is separate: the host has its own
+    /// `db::repo::ai_providers_repo::AiProvidersRepo` (a different type
+    /// than this crate's `roc_desk_common::ai::AiProvidersRepo`), but its
+    /// `ai_providers` table schema is kept column-for-column identical on
+    /// purpose (verified against host's `migrations/0007_ai_providers.sql`
+    /// + `0018`/`0019`/`0024`), so this one is safe to point at the host's
+    /// `roc_desk.db` and get a real shared provider list, unlike the other
+    /// tables above.
+    ///
+    /// `workspace_db_path` is also separate: just the "recent workspaces"
+    /// list, safe to point at the host's `workspaces/workspaces.db` for the
+    /// same reason (`roc_desk_core::workspace::WorkspaceRepo` genuinely is
+    /// the same type/schema the host's own `WorkspaceManager` uses).
+    ///
+    /// Passing the same path for all three is fine too (every caller did
+    /// that before this split) -- every `ensure_schema` here uses
+    /// `CREATE TABLE IF NOT EXISTS`, so sharing one file never collides.
+    ///
     /// `cache_root` is where the fallback `.rock_desk` workspace metadata
     /// cache directory lives (mirrors the host's `WorkspaceManager::new`).
     /// Remote workspace support starts disabled -- see
     /// [`WorkspaceAppState::with_ssh`].
     pub fn new(
         db_path: &std::path::Path,
+        ai_providers_db_path: &std::path::Path,
         workspace_db_path: &std::path::Path,
         cache_root: PathBuf,
     ) -> Result<Self, AppError> {
@@ -198,7 +213,12 @@ impl WorkspaceAppState {
         let credential_store: Arc<dyn roc_desk_core::credential::CredentialStore> =
             Arc::new(roc_desk_core::credential::KeyringStore);
 
-        let ai_providers_repo = Arc::new(roc_desk_common::ai::AiProvidersRepo::new(pool.clone()));
+        let ai_providers_pool = if ai_providers_db_path == db_path {
+            pool.clone()
+        } else {
+            roc_desk_core::db::pool::create_pool(ai_providers_db_path)?
+        };
+        let ai_providers_repo = Arc::new(roc_desk_common::ai::AiProvidersRepo::new(ai_providers_pool));
         ai_providers_repo.ensure_schema()?;
         let ai_provider_manager = Arc::new(roc_desk_common::ai::AiProviderManager::new(
             ai_providers_repo,

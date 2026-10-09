@@ -45,12 +45,21 @@ fn main() {
     // uses, so copying several standalone tool exes into one directory
     // makes them share it automatically.
     let data_dir = roc_desk_core::paths::portable_data_dir().expect("failed to resolve app data dir");
-    // AI coding agent state (providers/history/MCP/permission rules/audit/
-    // evidence) -- same filename the host points its own
-    // `roc_desk_workspace::WorkspaceAppState` at (`workspace_tool.db`, see
-    // host `src-tauri/src/lib.rs`), kept separate from the *workspace list*
-    // itself below.
+    // This crate's own AI-coding-agent tables (coding history/MCP/
+    // permission rules/audit/evidence) -- same filename the host points its
+    // own `roc_desk_workspace::WorkspaceAppState` at (`workspace_tool.db`,
+    // see host `src-tauri/src/lib.rs`). Kept separate from AI providers and
+    // the workspace list below: those two have schemas verified identical
+    // to the host's own (independently-implemented) equivalents, these
+    // don't, so sharing `roc_desk.db` for them would risk silent drift
+    // between two copies of a migration.
     let db_path = data_dir.join("workspace_tool.db");
+    // AI provider configs -- same file (`roc_desk.db`, the host's main db)
+    // the host's own AI panels (coding agent/SQL assist) read/write, so a
+    // provider configured in either place shows up in both. See
+    // `WorkspaceAppState::new`'s doc comment for the schema-compatibility
+    // check behind this.
+    let ai_providers_db_path = data_dir.join("roc_desk.db");
     // The actual "recent workspaces" list -- same file the host's own
     // `WorkspaceManager` reads/writes (`workspaces/workspaces.db`), not a
     // separate `workspace.db` of this exe's own, so folders opened in
@@ -81,7 +90,7 @@ fn main() {
                 .expect("bridge legacy sessions.db migration state");
             let ssh_state = roc_desk_ssh::RocDeskSshAppState::new(&ssh_db_path, app.handle().clone())
                 .expect("failed to init ssh state");
-            let workspace_state = WorkspaceAppState::new(&db_path, &workspace_db_path, cache_root.clone())
+            let workspace_state = WorkspaceAppState::new(&db_path, &ai_providers_db_path, &workspace_db_path, cache_root.clone())
                 .expect("failed to init workspace state")
                 .with_ssh(
                     ssh_state.connection_manager.clone(),
@@ -175,10 +184,11 @@ fn main() {
             roc_desk_workspace::cmd::fs_rename,
             roc_desk_workspace::cmd::fs_copy,
             roc_desk_workspace::cmd::fs_create_dir,
-            // SSH/Agent connection management + remote directory browsing --
-            // only the subset "连接远程主机并选择目录" actually needs (no
-            // terminal/RDP/SFTP dual-pane browser/transfer log; the coding
-            // workspace screen doesn't use those even in the full host app).
+            // SSH/Agent connection management + remote directory browsing +
+            // interactive terminal (the subset "连接远程主机并选择目录" +
+            // a remote workspace's own "终端" tab need -- still no RDP/SFTP
+            // dual-pane browser/transfer log, those aren't part of the
+            // coding workspace screen even in the full host app).
             roc_desk_ssh::cmd::connection_list,
             roc_desk_ssh::cmd::connection_create,
             roc_desk_ssh::cmd::connection_update,
@@ -193,6 +203,14 @@ fn main() {
             roc_desk_ssh::cmd::agent_list_roots,
             roc_desk_ssh::cmd::ssh_confirm_host_key,
             roc_desk_ssh::cmd::agent_confirm_cert,
+            roc_desk_ssh::cmd::ssh_open_shell,
+            roc_desk_ssh::cmd::ssh_write,
+            roc_desk_ssh::cmd::ssh_resize,
+            roc_desk_ssh::cmd::ssh_close_channel,
+            roc_desk_ssh::cmd::agent_open_shell,
+            roc_desk_ssh::cmd::agent_write,
+            roc_desk_ssh::cmd::agent_resize,
+            roc_desk_ssh::cmd::agent_close_channel,
             // Local filesystem surface, reused from roc_desk-explorer.
             roc_desk_workspace::roc_desk_explorer::cmd::local_list_dir,
             roc_desk_workspace::roc_desk_explorer::cmd::local_list_drives,

@@ -76,6 +76,14 @@
   --border: var(--border-default);
 }
 
+/* 细滚动条（原样搬自宿主 globals.css）——不加这条规则，所有 overflow 容器
+   （编辑器 Tab 栏/文件树/终端等）都会退化成 Windows 原生的宽滚动条，两头带
+   上下/左右箭头按钮，和应用本身的深色界面格格不入。 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: var(--radius-full); }
+::-webkit-scrollbar-thumb:hover { background: var(--text-disabled); }
+
 html, body, #root {
   height: 100%;
   margin: 0;
@@ -242,11 +250,15 @@ button {
 .editor-tab-diff-icon { width: 12px; height: 12px; flex-shrink: 0; color: var(--text-secondary); }
 .editor-tab-standalone-icon { width: 12px; height: 12px; flex-shrink: 0; color: var(--text-secondary); }
 
-.welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 12px; }
-.recent-list { list-style: none; margin: 0; padding: 0; width: 340px; }
-.recent-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-radius: var(--radius-sm); cursor: pointer; }
+/* 用 padding-top 固定在顶部附近，不用 justify-content: center——最近打开列表
+   长的时候（几十条），居中会把"打开文件夹"按钮顶到屏幕外面，必须滚动才能
+   看到，列表本身也没有自己的滚动边界，变成整页一起滚、体验很差。 */
+.welcome { display: flex; flex-direction: column; align-items: center; height: 100%; gap: 12px; padding-top: 10%; overflow-y: auto; box-sizing: border-box; }
+.recent-list { list-style: none; margin: 0; padding: 0; width: 420px; max-width: calc(100% - 48px); max-height: 50vh; overflow-y: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+.recent-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--border-subtle); }
+.recent-item:last-child { border-bottom: none; }
 .recent-item:hover { background: var(--bg-surface-raised); }
-.recent-item-path { color: var(--text-secondary); font-size: 11px; font-family: var(--font-mono); }
+.recent-item-path { color: var(--text-secondary); font-size: 11px; font-family: var(--font-mono); margin-top: 2px; }
 
 .git-panel { padding: 10px; overflow: auto; height: 100%; box-sizing: border-box; }
 .git-output { white-space: pre-wrap; font-family: var(--font-mono); font-size: 12px; background: var(--bg-surface-raised); padding: 8px; border-radius: var(--radius-sm); max-height: 280px; overflow: auto; }

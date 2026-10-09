@@ -12,6 +12,7 @@ import {
   registerAgentCertPromptListener,
 } from "@roc_desk/tool-ssh";
 import { TerminalPanel } from "./components/TerminalPanel";
+import { RemoteTerminalPanel } from "./components/RemoteTerminalPanel";
 import { GitPanel } from "./components/GitPanel";
 import { CodingAgentPanel } from "./components/CodingAgent/CodingAgentPanel";
 import { registerCodingListeners } from "./stores/codingStore";
@@ -261,16 +262,14 @@ export const App: React.FC = () => {
           </div>
           <div className="bottom-panel" style={{ height: bottomTab ? 280 : "auto" }}>
             <div className="bottom-panel-header">
-              {!isRemote && (
-                <div
-                  className="tab"
-                  style={{ borderRight: "none", color: bottomTab === "terminal" ? "var(--text-primary)" : "var(--text-secondary)" }}
-                  onClick={() => setBottomTab(bottomTab === "terminal" ? null : "terminal")}
-                >
-                  <TerminalSquare style={{ width: 13, height: 13, marginRight: 4, verticalAlign: -2 }} />
-                  终端
-                </div>
-              )}
+              <div
+                className="tab"
+                style={{ borderRight: "none", color: bottomTab === "terminal" ? "var(--text-primary)" : "var(--text-secondary)" }}
+                onClick={() => setBottomTab(bottomTab === "terminal" ? null : "terminal")}
+              >
+                <TerminalSquare style={{ width: 13, height: 13, marginRight: 4, verticalAlign: -2 }} />
+                终端
+              </div>
               {!isRemote && (
                 <div
                   className="tab"
@@ -284,7 +283,13 @@ export const App: React.FC = () => {
             </div>
             {bottomTab && (
               <div className="bottom-panel-body" style={{ display: "flex", flexDirection: "column" }}>
-                {bottomTab === "terminal" && <TerminalPanel cwd={workspace.root_path} key={workspace.id} />}
+                {bottomTab === "terminal" && (
+                  isRemote && workspace.connection_id ? (
+                    <RemoteTerminalPanel connectionId={workspace.connection_id} cwd={workspace.root_path} key={workspace.id} />
+                  ) : (
+                    <TerminalPanel cwd={workspace.root_path} key={workspace.id} />
+                  )
+                )}
                 {bottomTab === "git" && <GitPanel cwd={workspace.root_path} key={workspace.id} />}
               </div>
             )}
