@@ -16,8 +16,8 @@ roc_desk_explorer = { git = "https://github.com/swimhigh/roc_desk-explorer", pac
 # actual connection/FileOps, which roc_desk_core::workspace deliberately
 # cannot do itself (it never depends on roc_desk-ssh). See
 # WorkspaceAppState::new_with_ssh in lib.rs for how the pools get here.
-roc_desk_ssh = { git = "https://github.com/swimhigh/roc_desk-ssh", package = "roc_desk_ssh", tag = "v0.3.8" }
-roc_desk_protocol = { git = "https://github.com/swimhigh/roc_desk-ssh", package = "roc_desk_protocol", tag = "v0.3.8" }
+roc_desk_ssh = { git = "https://github.com/swimhigh/roc_desk-ssh", package = "roc_desk_ssh", tag = "v0.3.9" }
+roc_desk_protocol = { git = "https://github.com/swimhigh/roc_desk-ssh", package = "roc_desk_protocol", tag = "v0.3.9" }
 tauri = { version = "2" }
 tokio = { version = "1", features = ["sync", "process", "fs", "rt-multi-thread", "time", "macros"] }
 uuid = { version = "1", features = ["v4", "serde"] }
