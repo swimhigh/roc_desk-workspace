@@ -4,6 +4,39 @@ use roc_desk_workspace::roc_desk_editor::symbols::SymbolIndexState;
 use roc_desk_workspace::WorkspaceAppState;
 use tauri::Manager;
 
+/// See the identical helper in `roc_desk-ssh/standalone/src/main.rs` for the
+/// full rationale -- if `table_name` already exists (this db file was
+/// created by the full `roc_desk.exe` host's own migration set under a
+/// different name), record `migration_name` as already-applied so this
+/// crate's own migration doesn't try to re-run its `CREATE TABLE` against a
+/// table that's already there.
+fn bridge_migration_if_table_exists(
+    db_path: &std::path::Path,
+    migration_name: &str,
+    table_name: &str,
+) -> Result<(), roc_desk_core::error::AppError> {
+    let pool = roc_desk_core::db::pool::create_pool(db_path)?;
+    let conn = pool.get()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )?;
+    let table_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [table_name],
+        |r| r.get(0),
+    )?;
+    if table_exists {
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?1)",
+            [migration_name],
+        )?;
+    }
+    Ok(())
+}
+
 fn main() {
     // Portable, exe-relative `.rock_desk` dir (see
     // `roc_desk_core::paths::portable_data_dir` docs) instead of an
@@ -12,7 +45,19 @@ fn main() {
     // uses, so copying several standalone tool exes into one directory
     // makes them share it automatically.
     let data_dir = roc_desk_core::paths::portable_data_dir().expect("failed to resolve app data dir");
-    let db_path = data_dir.join("workspace.db");
+    // AI coding agent state (providers/history/MCP/permission rules/audit/
+    // evidence) -- same filename the host points its own
+    // `roc_desk_workspace::WorkspaceAppState` at (`workspace_tool.db`, see
+    // host `src-tauri/src/lib.rs`), kept separate from the *workspace list*
+    // itself below.
+    let db_path = data_dir.join("workspace_tool.db");
+    // The actual "recent workspaces" list -- same file the host's own
+    // `WorkspaceManager` reads/writes (`workspaces/workspaces.db`), not a
+    // separate `workspace.db` of this exe's own, so folders opened in
+    // either place show up in both.
+    let workspaces_dir = data_dir.join("workspaces");
+    std::fs::create_dir_all(&workspaces_dir).expect("create workspaces dir");
+    let workspace_db_path = workspaces_dir.join("workspaces.db");
     let cache_root = data_dir.join("workspace-cache");
 
     tauri::Builder::default()
@@ -20,17 +65,23 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(SymbolIndexState::default())
         .setup(move |app| {
-            // Standalone now owns its own SSH/Agent connection pools (a
-            // fresh `ssh.db`, independent of `workspace.db`) and feeds them
-            // into `WorkspaceAppState::with_ssh` -- this is what makes both
-            // `workspace_open_remote` (and, incidentally, local workspaces
-            // too: `CodingSession` always needs *some* pools passed to it,
-            // see `WorkspaceAppState::ssh`'s doc comment) actually work,
-            // instead of permanently returning "功能未启用" like before.
-            let ssh_db_path = data_dir.join("ssh.db");
+            // Same file the host's own SSH/RDP/Agent panel reads/writes
+            // (`sessions/sessions.db`), not a separate `ssh.db` of this
+            // exe's own, so connections saved in either place show up in
+            // both. Feeding these pools into `WorkspaceAppState::with_ssh`
+            // is what makes both `workspace_open_remote` (and, incidentally,
+            // local workspaces too: `CodingSession` always needs *some*
+            // pools passed to it, see `WorkspaceAppState::ssh`'s doc
+            // comment) actually work, instead of permanently returning
+            // "功能未启用" like before.
+            let sessions_dir = data_dir.join("sessions");
+            std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+            let ssh_db_path = sessions_dir.join("sessions.db");
+            bridge_migration_if_table_exists(&ssh_db_path, "0001_ssh_init", "connections")
+                .expect("bridge legacy sessions.db migration state");
             let ssh_state = roc_desk_ssh::RocDeskSshAppState::new(&ssh_db_path, app.handle().clone())
                 .expect("failed to init ssh state");
-            let workspace_state = WorkspaceAppState::new(&db_path, cache_root.clone())
+            let workspace_state = WorkspaceAppState::new(&db_path, &workspace_db_path, cache_root.clone())
                 .expect("failed to init workspace state")
                 .with_ssh(
                     ssh_state.connection_manager.clone(),

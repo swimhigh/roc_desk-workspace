@@ -164,16 +164,34 @@ pub struct WorkspaceAppState {
 }
 
 impl WorkspaceAppState {
-    /// `db_path` is this tool's own SQLite file (the "recent workspaces"
-    /// list, plus every other AI-coding-agent table added in this phase --
-    /// one file per tool, same convention as `roc_desk-ssh`/`roc_desk-sql`);
+    /// `db_path` is this tool's own SQLite file for every AI-coding-agent
+    /// table (AI providers/coding history/MCP servers/permission rules/
+    /// audit log/evidence cache); `workspace_db_path` is a **separate** file
+    /// for just the "recent workspaces" list -- split out so a caller can
+    /// point it at the same `workspaces.db` the full `roc_desk.exe` host's
+    /// own `WorkspaceManager` reads/writes (host keeps that file free of
+    /// this crate's AI-agent tables on purpose, see host
+    /// `src-tauri/src/lib.rs`'s comment by its own `WorkspaceAppState::new`
+    /// call). Passing the same path for both is fine too (that's what every
+    /// caller did before this split) -- `WorkspaceRepo::ensure_schema` and
+    /// every other `ensure_schema` here use `CREATE TABLE IF NOT EXISTS`,
+    /// so sharing one file across both never collides.
     /// `cache_root` is where the fallback `.rock_desk` workspace metadata
     /// cache directory lives (mirrors the host's `WorkspaceManager::new`).
     /// Remote workspace support starts disabled -- see
     /// [`WorkspaceAppState::with_ssh`].
-    pub fn new(db_path: &std::path::Path, cache_root: PathBuf) -> Result<Self, AppError> {
+    pub fn new(
+        db_path: &std::path::Path,
+        workspace_db_path: &std::path::Path,
+        cache_root: PathBuf,
+    ) -> Result<Self, AppError> {
         let pool = roc_desk_core::db::pool::create_pool(db_path)?;
-        let repo = roc_desk_core::workspace::WorkspaceRepo::new(pool.clone());
+        let workspace_pool = if workspace_db_path == db_path {
+            pool.clone()
+        } else {
+            roc_desk_core::db::pool::create_pool(workspace_db_path)?
+        };
+        let repo = roc_desk_core::workspace::WorkspaceRepo::new(workspace_pool);
         let workspace_manager = WorkspaceManager::new(repo, cache_root);
         workspace_manager.ensure_schema()?;
 
