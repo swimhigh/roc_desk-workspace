@@ -127,6 +127,121 @@ button {
 .bottom-panel-header { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-bottom: 1px solid var(--border-default); }
 .bottom-panel-body { flex: 1; min-height: 0; }
 
+/* AI 工具停靠在工作区右侧，和宿主 roc_desk.exe 的 `.ai-tools-dock` 布局/交互
+   一致（原样搬自宿主 components.css，不是本仓库自己设计的一套）。 */
+.ai-tools-dock {
+  min-width: 300px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-surface);
+}
+.ai-tools-resize-handle {
+  position: relative;
+  width: 4px;
+  flex: 0 0 4px;
+  cursor: col-resize;
+  background: var(--border-default);
+  transition: background 100ms ease;
+}
+.ai-tools-resize-handle::after { content: ""; position: absolute; inset: 0 -3px; }
+.ai-tools-resize-handle:hover,
+.ai-tools-resize-handle:active { background: var(--accent); }
+.ai-tools-dock-header {
+  height: 35px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+.ai-tools-dock-header > svg { width: 15px; height: 15px; color: var(--accent); }
+.ai-tools-dock-header .icon-btn { margin-left: auto; }
+
+.icon-btn {
+  width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.icon-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.icon-btn svg { width: 15px; height: 15px; }
+
+/* Editor Tab Strip -- 原样搬自宿主 components.css，`@roc_desk/tool-editor`
+   的 `CodeEditor.tsx` 已经渲染这套同名 className，之前只是本仓库没有补对应
+   的 CSS（roc_desk-editor 自己的 styles.css 里那份更薄，没有导入进本仓库，
+   见 docs/MULTI_REPO_SPLIT_PROGRESS.md）。 */
+.editor-tabs {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+.editor-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 6px 0 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-right: 1px solid var(--border-subtle);
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+  position: relative;
+}
+.editor-tab:hover { color: var(--text-primary); }
+.editor-tab.active {
+  background: var(--bg-app);
+  color: var(--text-primary);
+}
+.editor-tab.active::after {
+  content: "";
+  position: absolute;
+  top: -1px; left: 0; right: 0;
+  height: 2px;
+  background: var(--accent);
+}
+.editor-tab.preview .editor-tab-name { font-style: italic; }
+.editor-tab .dirty-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  flex-shrink: 0;
+}
+.editor-tab-close {
+  width: 18px; height: 18px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  opacity: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.editor-tab-close svg { width: 12px; height: 12px; }
+.editor-tab:hover .editor-tab-close,
+.editor-tab.active .editor-tab-close { opacity: 1; }
+.editor-tab-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+.editor-tab-diff-icon { width: 12px; height: 12px; flex-shrink: 0; color: var(--text-secondary); }
+.editor-tab-standalone-icon { width: 12px; height: 12px; flex-shrink: 0; color: var(--text-secondary); }
+
 .welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 12px; }
 .recent-list { list-style: none; margin: 0; padding: 0; width: 340px; }
 .recent-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-radius: var(--radius-sm); cursor: pointer; }
@@ -195,6 +310,7 @@ button {
 
 .quick-tool-btn { background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--text-secondary); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; }
 .quick-tool-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.quick-tool-btn.active { color: var(--accent); border-color: var(--accent); }
 .quick-tool-btn svg { width: 16px; height: 16px; }
 
 /* -------------------------------------------------------------------------

@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderOpen, X, TerminalSquare, GitBranch, Bot, Server } from "lucide-react";
+import { FolderOpen, X, TerminalSquare, GitBranch, Sparkles, Server } from "lucide-react";
 import { workspaceService, type WorkspaceProfile } from "./services";
 import { EditorPane, useEditorStore } from "@roc_desk/tool-editor";
 import { ExplorerTree } from "./components/Workspace/ExplorerTree";
@@ -18,7 +18,7 @@ import { registerCodingListeners } from "./stores/codingStore";
 import { ThemeToggle } from "./components/shared/ThemeToggle";
 import { ToastStack } from "./components/shared/Toast";
 
-type BottomTab = "terminal" | "git" | "ai" | null;
+type BottomTab = "terminal" | "git" | null;
 
 const WelcomeScreen: React.FC<{
   recent: WorkspaceProfile[];
@@ -89,6 +89,12 @@ export const App: React.FC = () => {
   const [bottomTab, setBottomTab] = useState<BottomTab>(null);
   const [error, setError] = useState<string | null>(null);
   const [showRemoteDialog, setShowRemoteDialog] = useState(false);
+  const [aiToolsOpen, setAiToolsOpen] = useState(false);
+  const [aiToolsWidth, setAiToolsWidth] = useState(() => {
+    const stored = Number(localStorage.getItem("roc_desk-ai-tools-width"));
+    return stored >= 300 && stored <= 4000 ? stored : 420;
+  });
+  const aiToolsDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   const refreshRecent = () => {
     workspaceService
@@ -152,6 +158,34 @@ export const App: React.FC = () => {
     }
   };
 
+  // 原样搬自宿主 `App.tsx` 的 AI 工具右侧停靠栏拖拽逻辑（`onMouseDown` + 全局
+  // `mousemove`/`mouseup`，不用 Pointer Events——和这个仓库其它地方的拖拽实现
+  // 风格不一致是故意的，为了和宿主的视觉/交互行为保持一致，直接照搬而不是
+  // 改写成本仓库惯用的写法）。
+  const onAiToolsDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    aiToolsDragRef.current = { startX: e.clientX, startWidth: aiToolsWidth };
+    let latest = aiToolsWidth;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: MouseEvent) => {
+      if (!aiToolsDragRef.current) return;
+      const maxWidth = Math.max(300, window.innerWidth - 260 - 24);
+      latest = Math.max(300, Math.min(maxWidth, aiToolsDragRef.current.startWidth + aiToolsDragRef.current.startX - ev.clientX));
+      setAiToolsWidth(latest);
+    };
+    const onUp = () => {
+      aiToolsDragRef.current = null;
+      localStorage.setItem("roc_desk-ai-tools-width", String(latest));
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   const closeWorkspace = () => {
     if (workspace) void workspaceService.close(workspace.id);
     setWorkspace(null);
@@ -197,6 +231,13 @@ export const App: React.FC = () => {
       <div className="titlebar">
         <span className="titlebar-title">{workspace.display_name}</span>
         <span className="titlebar-path">{workspace.root_path}</span>
+        <button
+          className={`quick-tool-btn ${aiToolsOpen ? "active" : ""}`}
+          title="AI 编程助手"
+          onClick={() => setAiToolsOpen((open) => !open)}
+        >
+          <Sparkles style={{ width: 16, height: 16 }} />
+        </button>
         <ThemeToggle />
         <button className="btn ghost" onClick={closeWorkspace} title="关闭工作区">
           <X style={{ width: 14, height: 14 }} />
@@ -218,7 +259,7 @@ export const App: React.FC = () => {
           <div className="main-content">
             <EditorPane workspaceId={workspace.id} rootPath={workspace.root_path} />
           </div>
-          <div className="bottom-panel" style={{ height: bottomTab === "ai" ? 520 : bottomTab ? 280 : "auto" }}>
+          <div className="bottom-panel" style={{ height: bottomTab ? 280 : "auto" }}>
             <div className="bottom-panel-header">
               {!isRemote && (
                 <div
@@ -240,30 +281,34 @@ export const App: React.FC = () => {
                   Git
                 </div>
               )}
-              <div
-                className="tab"
-                style={{ borderRight: "none", color: bottomTab === "ai" ? "var(--text-primary)" : "var(--text-secondary)" }}
-                onClick={() => setBottomTab(bottomTab === "ai" ? null : "ai")}
-              >
-                <Bot style={{ width: 13, height: 13, marginRight: 4, verticalAlign: -2 }} />
-                AI 编程助手
-              </div>
             </div>
             {bottomTab && (
               <div className="bottom-panel-body" style={{ display: "flex", flexDirection: "column" }}>
                 {bottomTab === "terminal" && <TerminalPanel cwd={workspace.root_path} key={workspace.id} />}
                 {bottomTab === "git" && <GitPanel cwd={workspace.root_path} key={workspace.id} />}
-                {bottomTab === "ai" && (
-                  <CodingAgentPanel
-                    workspaceId={workspace.id}
-                    active={bottomTab === "ai"}
-                    onOpenFile={(path) => void useEditorStore.getState().openPreview(workspace.id, path)}
-                  />
-                )}
               </div>
             )}
           </div>
         </div>
+        {aiToolsOpen && (
+          <>
+            <div className="ai-tools-resize-handle" onMouseDown={onAiToolsDragStart} title="左右拖动调整 AI 工具宽度" />
+            <aside className="ai-tools-dock" style={{ width: aiToolsWidth }}>
+              <div className="ai-tools-dock-header">
+                <Sparkles />
+                <span>AI 编程助手</span>
+                <button className="icon-btn" onClick={() => setAiToolsOpen(false)} title="关闭">
+                  ×
+                </button>
+              </div>
+              <CodingAgentPanel
+                workspaceId={workspace.id}
+                active={aiToolsOpen}
+                onOpenFile={(path) => void useEditorStore.getState().openPreview(workspace.id, path)}
+              />
+            </aside>
+          </>
+        )}
       </div>
     </div>
   );
