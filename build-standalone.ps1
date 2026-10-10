@@ -31,3 +31,15 @@ New-Item -ItemType Directory -Force $bin | Out-Null
 $destination = Join-Path $bin 'roc_desk-workspace.exe'
 Copy-Item $source $destination -Force
 Write-Output "Built $destination"
+
+# 2026-10 用户需求：构建完默认再把产物拷一份进 roc_desk-releases\bundle\，不用
+# 每次手动搬——这是多拷一份，不影响上面已经写好的 bin\（本地快速验证用）。
+# releases 仓库是约定中的同级目录（和这个仓库一起 clone 在 roc_tools\ 下），
+# 这台机器上没 clone 这个仓库就跳过，不算构建失败。
+$releasesBundle = Join-Path $root '..\roc_desk-releases\bundle'
+if (Test-Path -LiteralPath $releasesBundle) {
+    Copy-Item -LiteralPath $destination -Destination (Join-Path $releasesBundle (Split-Path $destination -Leaf)) -Force
+    Write-Output "Also copied to $releasesBundle"
+} else {
+    Write-Warning "roc_desk-releases\bundle not found at $releasesBundle, skipped release copy"
+}
