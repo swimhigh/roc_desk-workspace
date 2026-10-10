@@ -25,6 +25,7 @@ use roc_desk_core::workspace::WorkspaceKind;
 use super::git_ops::SshGitCommitter;
 use super::history::{CodingHistoryRepo, CodingHistorySummary, WorkspaceHistorySnapshot};
 use super::session::{CodingMode, CodingSession};
+use serde_json::Value as JsonValue;
 use super::skills::SkillMeta;
 use super::tools::TodoItem;
 use crate::WorkspaceAppState;
@@ -36,6 +37,31 @@ use crate::WorkspaceAppState;
 /// cap means the connection is already unusable, no reason to make the
 /// user wait for the minutes-level timeout `exec`/transfers use.
 const WORKSPACE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// History entry detail returned to the frontend -- no longer produced by
+/// `CodingHistoryRepo` (the real `timeline`/`changes`/`messages` only live in
+/// the workspace mirror file now), built here on the fly by
+/// `coding_history_get`/`coding_history_resume` from a freshly read
+/// `WorkspaceHistorySnapshot`, see `load_history_snapshot`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CodingHistoryDetail {
+    #[serde(flatten)]
+    pub summary: CodingHistorySummary,
+    pub workspace_id: Uuid,
+    pub timeline: JsonValue,
+    pub changes: JsonValue,
+    /// Never serialized to the frontend over IPC -- only read internally by
+    /// `coding_history_resume` to rebuild a session.
+    #[serde(skip)]
+    pub messages: JsonValue,
+    /// Whether the content was actually read from the workspace directory --
+    /// `false` when the workspace is unreachable (e.g. a disconnected SSH
+    /// target) or the file is missing; `timeline`/`changes`/`messages` are
+    /// all empty values in that case. The frontend uses this to show "could
+    /// not load this history entry" instead of assuming the entry is
+    /// genuinely empty.
+    pub content_available: bool,
+}
 
 /// Max number of workspace history snapshots (`.rock_desk/sessions/{id}.json`)
 /// a single "list history" call will synchronously wait to import, newest
@@ -318,9 +344,11 @@ pub(crate) async fn build_new_session(
                     })
                     .unwrap_or(false);
                 if recent {
-                    if let Ok(Some(detail)) = state.coding_history.get(latest.id) {
+                    if let Some(snapshot) =
+                        load_history_snapshot(state, workspace_id, latest.id).await
+                    {
                         if let Ok(changes) =
-                            serde_json::from_value::<Vec<FileChange>>(detail.changes)
+                            serde_json::from_value::<Vec<FileChange>>(snapshot.input.changes)
                         {
                             change_store.lock().await.restore(changes);
                         }
@@ -480,12 +508,13 @@ fn summarize_turn_changes<'a>(changes: impl Iterator<Item = &'a FileChange>) -> 
     }
 }
 
-/// Imports the workspace's own `.rock_desk/sessions/*.json` snapshots (see
-/// `coding_history_save`'s doc comment -- a second, workspace-portable copy
-/// of history, on top of local SQLite) into the local cache before listing
-/// from it. `build_new_session` reuses this same function to find "the most
-/// recent session" to restore `session.changes` from -- both call sites
-/// must agree on what "most recent" means.
+/// Reconciles the local summary cache against the workspace's own
+/// `.rock_desk/sessions/*.json` snapshot files (see `coding_history_save`'s
+/// doc comment -- the sole copy of history content, only the summary gets
+/// cached locally) before listing from it. `build_new_session` reuses this
+/// same function to find "the most recent session" to restore
+/// `session.changes` from -- both call sites must agree on what "most
+/// recent" means.
 pub(crate) async fn history_list_with_import(
     state: &State<'_, WorkspaceAppState>,
     workspace_id: Uuid,
@@ -538,47 +567,56 @@ pub(crate) async fn history_list_with_import(
     state.coding_history.list(workspace_id)
 }
 
-/// Per-history-entry "workspace directory is the source of truth" refresh --
-/// `history_list_with_import` is the batch reconciliation used for listing
-/// (list the directory once, skip unchanged files); this is the precise
-/// single-file reconciliation used when opening/viewing one specific
-/// history entry. A read failure (network hiccup/file missing) isn't
-/// treated as an error, silently falls back to whatever's already in the
-/// local cache -- this is "try to get the latest", not "must get the
-/// latest".
-pub(crate) async fn refresh_history_from_workspace(
+/// Reads a history entry's real content straight from its workspace mirror
+/// file -- `history_list_with_import` is the batch reconciliation used for
+/// listing (list the directory once, skip unchanged files, only keep
+/// summaries); this is the precise single-file read used when opening/
+/// viewing/resuming one specific history entry. `timeline`/`changes`/
+/// `messages` have exactly one copy (the workspace file, see `history.rs`'s
+/// module docs) -- content is used and discarded, never persisted into the
+/// local `coding_history` table.
+///
+/// Falls back to `fallback_cache_dir` (the local best-effort copy
+/// `coding_history_save` writes when mirroring to the workspace fails) if
+/// the remote read fails. Returns `None` if neither succeeds -- callers must
+/// treat that as "genuinely couldn't read this", never silently substitute
+/// an empty conversation.
+pub(crate) async fn load_history_snapshot(
     state: &State<'_, WorkspaceAppState>,
     workspace_id: Uuid,
     history_id: Uuid,
-) {
-    let Some(handle) = state.open_workspaces.read().await.get(&workspace_id).cloned() else {
-        return;
-    };
+) -> Option<WorkspaceHistorySnapshot> {
+    let handle = state
+        .open_workspaces
+        .read()
+        .await
+        .get(&workspace_id)
+        .cloned()?;
     let path = format!(
         "{}/.rock_desk/sessions/{history_id}.json",
         handle.profile.root_path.trim_end_matches(['/', '\\'])
     );
-    if let Ok(Ok(file)) =
-        tokio::time::timeout(WORKSPACE_PROBE_TIMEOUT, handle.file_ops.read_file(&path)).await
-    {
-        if let Ok(snapshot) = serde_json::from_str::<WorkspaceHistorySnapshot>(&file.text) {
-            if snapshot.input.workspace_id == workspace_id {
-                let _ = state.coding_history.import_snapshot(&snapshot);
-                return;
-            }
+    let remote = tokio::time::timeout(WORKSPACE_PROBE_TIMEOUT, handle.file_ops.read_file(&path))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .and_then(|file| serde_json::from_str::<WorkspaceHistorySnapshot>(&file.text).ok())
+        .filter(|snapshot| snapshot.input.workspace_id == workspace_id);
+    let snapshot = match remote {
+        Some(snapshot) => Some(snapshot),
+        None => {
+            let fallback = handle
+                .fallback_cache_dir
+                .join("sessions")
+                .join(format!("{history_id}.json"));
+            std::fs::read(fallback)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<WorkspaceHistorySnapshot>(&bytes).ok())
+                .filter(|snapshot| snapshot.input.workspace_id == workspace_id)
         }
-    }
-    let fallback = handle
-        .fallback_cache_dir
-        .join("sessions")
-        .join(format!("{history_id}.json"));
-    if let Ok(bytes) = std::fs::read(fallback) {
-        if let Ok(snapshot) = serde_json::from_slice::<WorkspaceHistorySnapshot>(&bytes) {
-            if snapshot.input.workspace_id == workspace_id {
-                let _ = state.coding_history.import_snapshot(&snapshot);
-            }
-        }
-    }
+    }?;
+    let _ = state.coding_history.import_snapshot(&snapshot);
+    Some(snapshot)
 }
 
 /// `skill_import`'s temp-extraction-directory guard -- cleaned up on both

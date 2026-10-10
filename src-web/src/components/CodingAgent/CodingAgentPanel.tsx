@@ -172,6 +172,7 @@ export const CodingAgentPanel: React.FC<CodingAgentPanelProps> = ({ workspaceId,
     viewingHistoryId,
     loadHistories,
     openHistory,
+    openingHistoryId,
     deleteHistory,
     renameHistory,
     newSession,
@@ -1040,7 +1041,7 @@ export const CodingAgentPanel: React.FC<CodingAgentPanelProps> = ({ workspaceId,
         />
       )}
       {showProviders && <ProviderManagerDialog onClose={(hasDraft) => { setShowProviders(false); setProviderDraftPending(hasDraft); }} />}
-      {showHistory && <CodingHistoryDialog title="编程会话历史" emptyText="还没有已保存的编程会话" histories={histories} onOpen={(id) => { openHistory(id); setShowHistory(false); }} onDelete={deleteHistory} onRename={renameHistory} onClose={() => setShowHistory(false)} />}
+      {showHistory && <CodingHistoryDialog title="编程会话历史" emptyText="还没有已保存的编程会话" histories={histories} onOpen={async (id) => { const ok = await openHistory(id); if (ok) setShowHistory(false); }} onDelete={deleteHistory} onRename={renameHistory} onClose={() => setShowHistory(false)} openingId={openingHistoryId} />}
       {showPermissionRules && <PermissionRulesDialog onClose={() => setShowPermissionRules(false)} />}
       {showMcpServers && <McpServerManagerDialog onClose={() => setShowMcpServers(false)} />}
       {showSkills && <SkillManagerDialog workspaceId={workspaceId} onClose={() => setShowSkills(false)} />}

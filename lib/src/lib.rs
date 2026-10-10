@@ -327,11 +327,11 @@ pub mod cmd {
     use roc_desk_common::change_store::{ChangeStatus, CodingTarget, FileChange, FileSyncInfo};
     use crate::coding::commands::{
         build_new_session, clear_probe_cache, get_change_store, get_session,
-        history_list_with_import, maybe_auto_continue, refresh_history_from_workspace,
-        session_info, CodingSessionInfo, TempDirGuard,
+        history_list_with_import, load_history_snapshot, maybe_auto_continue, session_info,
+        CodingHistoryDetail, CodingSessionInfo, TempDirGuard,
     };
     use crate::coding::history::{
-        CodingHistoryDetail, CodingHistoryInput, CodingHistorySummary, WorkspaceHistorySnapshot,
+        CodingHistoryInput, CodingHistorySummary, WorkspaceHistorySnapshot,
     };
     use crate::coding::mcp::{McpServer, McpServerInput};
     use crate::coding::permission::{Decision, PermissionRule};
@@ -1672,11 +1672,11 @@ pub mod cmd {
             input.messages = serde_json::to_value(&messages).unwrap_or_default();
         }
         state.coding_history.save(&input)?;
-        if let Some(detail) = state.coding_history.get(input.id)? {
+        if let Some(location) = state.coding_history.get_location(input.id)? {
             let snapshot = WorkspaceHistorySnapshot {
                 input: input.clone(),
-                created_at: detail.summary.created_at,
-                updated_at: detail.summary.updated_at,
+                created_at: location.summary.created_at,
+                updated_at: location.summary.updated_at,
             };
             if let Some(handle) = state
                 .open_workspaces
@@ -1739,10 +1739,27 @@ pub mod cmd {
         state: State<'_, WorkspaceAppState>,
         id: Uuid,
     ) -> Result<Option<CodingHistoryDetail>, AppError> {
-        if let Some(existing) = state.coding_history.get(id)? {
-            refresh_history_from_workspace(&state, existing.workspace_id, id).await;
+        let Some(location) = state.coding_history.get_location(id)? else {
+            return Ok(None);
+        };
+        match load_history_snapshot(&state, location.workspace_id, id).await {
+            Some(snapshot) => Ok(Some(CodingHistoryDetail {
+                summary: location.summary,
+                workspace_id: location.workspace_id,
+                timeline: snapshot.input.timeline,
+                changes: snapshot.input.changes,
+                messages: snapshot.input.messages,
+                content_available: true,
+            })),
+            None => Ok(Some(CodingHistoryDetail {
+                summary: location.summary,
+                workspace_id: location.workspace_id,
+                timeline: serde_json::Value::Null,
+                changes: serde_json::Value::Null,
+                messages: serde_json::Value::Null,
+                content_available: false,
+            })),
         }
-        state.coding_history.get(id)
     }
 
     /// Opens a history entry and genuinely continues the conversation (not
@@ -1758,42 +1775,51 @@ pub mod cmd {
         history_id: Uuid,
     ) -> Result<CodingSessionInfo, AppError> {
         require_ssh(&state)?;
-        refresh_history_from_workspace(&state, workspace_id, history_id).await;
-        let detail = state
+        let location = state
             .coding_history
-            .get(history_id)?
+            .get_location(history_id)?
             .ok_or_else(|| AppError::NotFound(format!("history not found: {history_id}")))?;
-        if detail.workspace_id != workspace_id {
+        if location.workspace_id != workspace_id {
             return Err(AppError::Internal("这条历史记录不属于当前工作区".into()));
         }
         if state
             .ai_provider_manager
-            .get(detail.summary.provider_id)?
+            .get(location.summary.provider_id)?
             .is_none()
         {
             return Err(AppError::NotFound(
                 "这条历史记录关联的 AI 供应商已被删除，请先在模型管理里重新配置后再试".into(),
             ));
         }
+        // 这几份内容现在只存工作区目录一份，续聊必须真的读到它们才有意义——
+        // 读不到（工作区断连/文件被删）不能悄悄当成"空对话"续上。
+        let snapshot = load_history_snapshot(&state, workspace_id, history_id)
+            .await
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "无法连接到该历史记录所在的工作区，暂时读取不到完整的对话内容，请检查连接后重试"
+                        .into(),
+                )
+            })?;
 
         let (mut session, change_store) = build_new_session(
             &state,
             workspace_id,
-            detail.summary.provider_id,
+            location.summary.provider_id,
             false,
             Some(history_id),
         )
         .await?;
-        session.mode = if detail.summary.mode == "build" {
+        session.mode = if location.summary.mode == "build" {
             CodingMode::Build
         } else {
             CodingMode::Plan
         };
         let messages: Vec<serde_json::Value> =
-            serde_json::from_value(detail.messages.clone()).unwrap_or_default();
+            serde_json::from_value(snapshot.input.messages).unwrap_or_default();
         session.restore_messages(messages);
         let changes: Vec<FileChange> =
-            serde_json::from_value(detail.changes.clone()).unwrap_or_default();
+            serde_json::from_value(snapshot.input.changes).unwrap_or_default();
         change_store.lock().await.restore(changes);
 
         let info = session_info(&session).await;

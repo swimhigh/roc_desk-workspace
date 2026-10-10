@@ -279,6 +279,9 @@ export interface CodingHistoryDetail extends CodingHistorySummary {
   workspace_id: string;
   timeline: unknown;
   changes: unknown;
+  /** 内容是否成功从工作区目录读到——为 false 时 timeline/changes 都是空值，
+   * 说明工作区暂时不可达（比如远程 SSH 断连），不是这条历史本来就是空的。 */
+  content_available: boolean;
 }
 
 export interface CodingTodoUpdateEvent {

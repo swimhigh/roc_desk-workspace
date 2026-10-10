@@ -124,6 +124,12 @@ interface CodingState {
   skills: SkillMeta[];
   histories: CodingHistorySummary[];
   viewingHistoryId: string | null;
+  /** History entry currently being opened (`historyGet`+`historyResume`) --
+   * both now read the real content straight from the workspace mirror file
+   * every time (no more full local cache), so this can take a moment on a
+   * remote workspace; the dialog shows "opening..." on that row instead of
+   * looking stuck. */
+  openingHistoryId: string | null;
   /** Most-recently-used workspace ids, newest first -- only used to decide
    * LRU eviction order. */
   residentOrder: string[];
@@ -132,7 +138,10 @@ interface CodingState {
   byWorkspace: Record<string, WorkspaceSnapshot>;
   loadHistories: (workspaceId?: string) => Promise<void>;
   saveCurrentHistory: () => Promise<void>;
-  openHistory: (id: string) => Promise<void>;
+  /** Returns whether it actually resumed -- callers use this to decide
+   * whether to close the history dialog (stay open on failure so the user
+   * sees `error` and can try another entry). */
+  openHistory: (id: string) => Promise<boolean>;
   deleteHistory: (id: string) => Promise<void>;
   renameHistory: (id: string, title: string) => Promise<void>;
   newSession: (providerId: string) => Promise<void>;
@@ -208,6 +217,7 @@ export const useCodingStore = create<CodingState>((set, get) => ({
   skills: [],
   histories: [],
   viewingHistoryId: null,
+  openingHistoryId: null,
   residentOrder: [],
   byWorkspace: {},
 
@@ -549,22 +559,30 @@ export const useCodingStore = create<CodingState>((set, get) => ({
   openHistory: async (id) => {
     await get().saveCurrentHistory();
     const workspaceId = get().workspaceId;
-    if (!workspaceId) return;
-    const detail = await codingService.historyGet(id);
-    if (!detail) return;
+    if (!workspaceId) return false;
+    set({ openingHistoryId: id });
     try {
+      const detail = await codingService.historyGet(id);
+      if (!detail) {
+        set({ error: "这条历史记录已经不存在了" });
+        return false;
+      }
       const info = await codingService.historyResume(workspaceId, id);
       const changes = detail.changes as FileChange[];
       set({
         workspaceId,
         viewingHistoryId: null,
         sessionInfo: info,
-        timeline: detail.timeline as TimelineEntry[],
-        changesById: Object.fromEntries(changes.map((c) => [c.id, c])),
+        timeline: (detail.timeline as TimelineEntry[]) ?? [],
+        changesById: Object.fromEntries((changes ?? []).map((c) => [c.id, c])),
         error: null,
       });
+      return true;
     } catch (e) {
       set({ error: formatError(e) });
+      return false;
+    } finally {
+      set({ openingHistoryId: null });
     }
   },
 
@@ -699,6 +717,7 @@ export const useCodingStore = create<CodingState>((set, get) => ({
       confirmRequest: null,
       confirmQueue: [],
       questionRequest: null,
+      openingHistoryId: null,
       residentOrder: [],
       byWorkspace: {},
     }),
